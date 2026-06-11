@@ -18,9 +18,16 @@ import { preset, type PresetName } from './sim'
 import { makeBot, runMany } from './bots'
 import { runGame } from './game/app'
 import { runDemo } from './game/demo'
+import { LlmProvider } from './content/llm'
+
+/** Present only when LLM mode was requested (--llm / --llm-url / --llm-model). */
+export interface LlmCliOptions {
+  url: string | null
+  model: string | null
+}
 
 export type Parsed =
-  | { cmd: 'play'; preset: PresetName; seed: number | null; warp: number }
+  | { cmd: 'play'; preset: PresetName; seed: number | null; warp: number; llm?: LlmCliOptions }
   | { cmd: 'sim'; bot: string; rounds: number; seed: number; preset: PresetName; json: boolean }
   | { cmd: 'demo'; file: string }
   | { cmd: 'gates'; rest: string[] }
@@ -32,10 +39,17 @@ export function usage(): string {
     '',
     'usage:',
     '  oom play  [--preset chill|default|inferno] [--seed N] [--warp N]',
+    '            [--llm] [--llm-url URL] [--llm-model M]',
     '  oom sim   --bot recency|random-k|greedy-heat|reactive|oracle',
     '            --rounds N [--seed N] [--preset P] [--json]',
     '  oom demo  [file.md]               (default assets/demo.md)',
     '  oom gates [args…]                 (passthrough to scripts/gates.ts)',
+    '',
+    'llm mode (play --llm): prose streams from an OpenAI-compatible endpoint,',
+    'sanitized, with seamless scripted fallback — the game never blocks on it.',
+    '--llm-url/--llm-model imply --llm and override the env defaults:',
+    '  OOM_LLM_BASE_URL (default http://localhost:8000/v1)',
+    '  OOM_LLM_MODEL    (default Qwen/Qwen3-0.6B) · OOM_LLM_API_KEY (bearer)',
   ].join('\n')
 }
 
@@ -58,13 +72,28 @@ export function parseCli(argv: readonly string[]): Parsed {
     let presetName: PresetName = 'default'
     let seed: number | null = null
     let warp = 0
+    let llm = false
+    let llmUrl: string | null = null
+    let llmModel: string | null = null
     for (let i = 0; i < rest.length; i++) {
       const a = rest[i]!
       if (a === '--preset') presetName = parsePreset(rest[++i] ?? '')
       else if (a === '--seed') seed = num(rest[++i], '--seed')
       else if (a === '--warp') warp = Math.max(0, num(rest[++i], '--warp'))
-      else throw new Error(`unknown flag '${a}' for play`)
+      else if (a === '--llm') llm = true
+      else if (a === '--llm-url') {
+        const v = rest[++i]
+        if (v === undefined) throw new Error('--llm-url needs a value')
+        llmUrl = v
+        llm = true
+      } else if (a === '--llm-model') {
+        const v = rest[++i]
+        if (v === undefined) throw new Error('--llm-model needs a value')
+        llmModel = v
+        llm = true
+      } else throw new Error(`unknown flag '${a}' for play`)
     }
+    if (llm) return { cmd: 'play', preset: presetName, seed, warp, llm: { url: llmUrl, model: llmModel } }
     return { cmd: 'play', preset: presetName, seed, warp }
   }
 
@@ -148,12 +177,38 @@ async function main(argv: readonly string[]): Promise<number> {
     case 'play': {
       // Wall clock is fine HERE (outside the sim): default seed only.
       const seed = parsed.seed ?? Date.now() % 1_000_000
-      return await runGame({
+      // LLM mode: provider + a one-line status. The in-game bottom-bar
+      // flash lives inside GameApp (not reachable from here without
+      // touching src/game), so status prints around the session instead.
+      let llm: LlmProvider | undefined
+      if (parsed.llm) {
+        llm = new LlmProvider({
+          baseUrl: parsed.llm.url ?? undefined,
+          model: parsed.llm.model ?? undefined,
+        })
+        const live = await llm.probe(1500)
+        console.log(
+          live
+            ? `llm: live — ${llm.model} @ ${llm.baseUrl}`
+            : `llm: unreachable @ ${llm.baseUrl} — degraded (scripted prose, auto-retry in game)`,
+        )
+      }
+      const code = await runGame({
         config: preset(parsed.preset),
         seed,
         presetName: parsed.preset,
         warpTicks: parsed.warp,
+        provider: llm,
       })
+      if (llm) {
+        const s = llm.stats()
+        console.log(
+          `llm: ${s.live} chunks live · ${s.padded} padded · ${s.fallback} scripted` +
+            (s.degraded ? ' · degraded at exit' : ''),
+        )
+        for (const e of s.events.slice(-4)) console.log(`  llm│ ${e}`)
+      }
+      return code
     }
     case 'sim':
       try {
