@@ -20,7 +20,7 @@ import { runGame } from './game/app'
 import { runDemo } from './game/demo'
 
 export type Parsed =
-  | { cmd: 'play'; preset: PresetName; seed: number | null }
+  | { cmd: 'play'; preset: PresetName; seed: number | null; warp: number }
   | { cmd: 'sim'; bot: string; rounds: number; seed: number; preset: PresetName; json: boolean }
   | { cmd: 'demo'; file: string }
   | { cmd: 'gates'; rest: string[] }
@@ -31,7 +31,7 @@ export function usage(): string {
     'oom — you are the KV-cache eviction & prefetch policy',
     '',
     'usage:',
-    '  oom play  [--preset chill|default|inferno] [--seed N]',
+    '  oom play  [--preset chill|default|inferno] [--seed N] [--warp N]',
     '  oom sim   --bot recency|random-k|greedy-heat|reactive|oracle',
     '            --rounds N [--seed N] [--preset P] [--json]',
     '  oom demo  [file.md]               (default assets/demo.md)',
@@ -57,13 +57,15 @@ export function parseCli(argv: readonly string[]): Parsed {
   if (cmd === 'play') {
     let presetName: PresetName = 'default'
     let seed: number | null = null
+    let warp = 0
     for (let i = 0; i < rest.length; i++) {
       const a = rest[i]!
       if (a === '--preset') presetName = parsePreset(rest[++i] ?? '')
       else if (a === '--seed') seed = num(rest[++i], '--seed')
+      else if (a === '--warp') warp = Math.max(0, num(rest[++i], '--warp'))
       else throw new Error(`unknown flag '${a}' for play`)
     }
-    return { cmd: 'play', preset: presetName, seed }
+    return { cmd: 'play', preset: presetName, seed, warp }
   }
 
   if (cmd === 'sim') {
@@ -146,7 +148,12 @@ async function main(argv: readonly string[]): Promise<number> {
     case 'play': {
       // Wall clock is fine HERE (outside the sim): default seed only.
       const seed = parsed.seed ?? Date.now() % 1_000_000
-      return await runGame({ config: preset(parsed.preset), seed, presetName: parsed.preset })
+      return await runGame({
+        config: preset(parsed.preset),
+        seed,
+        presetName: parsed.preset,
+        warpTicks: parsed.warp,
+      })
     }
     case 'sim':
       try {

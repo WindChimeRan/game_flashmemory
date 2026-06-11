@@ -22,6 +22,7 @@
 import {
   createSim,
   type Action,
+  type DeathInfo,
   type RejectReason,
   type Sim,
   type SimConfig,
@@ -170,6 +171,25 @@ const FLASH_MS = 1400
 const MAX_QUEUE = 8
 const MISS_CORRUPT_TICKS = 15
 
+/**
+ * Warp-mode caretaker: under pressure evict the largest unprotected chunk;
+ * otherwise age cold history toward the chip rail (which is also what lets
+ * the director schedule standard waves — they demand all-chip aged glyphs).
+ */
+export function warpHousekeeping(view: SimView): Action[] {
+  const headroom = view.meters.viewportBudget - view.meters.viewportUsed
+  let pick: { id: number; key: number } | null = null
+  for (const c of view.chunks) {
+    if (c.tier === 0 || c.protected || c.pinned || c.transfer) continue
+    if (headroom <= 4) {
+      if (!pick || c.linesNow > pick.key) pick = { id: c.id, key: c.linesNow }
+    } else if (c.ageTicks >= 60) {
+      if (!pick || c.ageTicks > pick.key) pick = { id: c.id, key: c.ageTicks }
+    }
+  }
+  return pick ? [{ kind: 'down', chunkId: pick.id }] : []
+}
+
 export interface GameAppOptions {
   config: SimConfig
   seed: number
@@ -179,6 +199,14 @@ export interface GameAppOptions {
   /** Raw escape-sequence sink for the pause mouse toggle (default: none
    *  when a term is injected, process.stdout otherwise). */
   rawOut?: { write(s: string): boolean } | null
+  /**
+   * Dev/demo fast-forward: run this many sim ticks instantly before the
+   * realtime loop, with a deterministic housekeeping policy (evict the
+   * largest unprotected chunk under pressure) whose actions are recorded
+   * in the action log — replays stay exact. Wall clock never enters the
+   * sim either way.
+   */
+  warpTicks?: number
 }
 
 export class GameApp {
@@ -200,6 +228,7 @@ export class GameApp {
   private readonly provider: ContentProvider
   private readonly rawOut: { write(s: string): boolean } | null
   private readonly ownsTerm: boolean
+  private readonly warpTicks: number
   private prose: ProseStore
   private readonly tweens = new TweenRuntime()
   private pending: Action[] = []
@@ -220,14 +249,40 @@ export class GameApp {
     this.provider = opts.provider ?? new ScriptedProvider()
     this.rawOut =
       opts.rawOut !== undefined ? opts.rawOut : this.ownsTerm ? process.stdout : null
+    this.warpTicks = Math.max(0, opts.warpTicks ?? 0)
     this.sim = createSim(this.config, this.seed)
     this.prose = new ProseStore(this.provider, proseWidth(this.term.cols))
+  }
+
+  private checkOver(death: DeathInfo | null): void {
+    if (death) {
+      this.over = { kind: death.cause, summary: death.summary, result: this.sim.result() }
+    } else if (this.sim.done && this.over === null) {
+      const res = this.sim.result()
+      this.over = {
+        kind: 'survived',
+        summary: `the stream ended and coherence held — ${res.waves.length} waves served, mean recall ${res.meanCredit.toFixed(2)}`,
+        result: res,
+      }
+    }
   }
 
   start(nowMs: number): void {
     this.term.start()
     this.unsub = this.term.onInput((e) => this.handleInput(e))
+    if (this.warpTicks > 0) this.warp(this.warpTicks)
     this.frame(nowMs)
+  }
+
+  /** Fast-forward (see GameAppOptions.warpTicks). Deterministic. */
+  private warp(ticks: number): void {
+    for (let i = 0; i < ticks && !this.sim.done; i++) {
+      const actions = warpHousekeeping(this.sim.view())
+      const ev = this.sim.tick(actions)
+      if (actions.length > 0) this.actionLog.push({ tick: this.sim.tickNow, actions })
+      for (const id of ev.spawned) this.prose.ensure(this.sim.chunkSpec(id))
+      this.checkOver(ev.death)
+    }
   }
 
   stop(): void {
@@ -322,16 +377,7 @@ export class GameApp {
       }
     }
 
-    if (ev.death) {
-      this.over = { kind: ev.death.cause, summary: ev.death.summary, result: this.sim.result() }
-    } else if (this.sim.done) {
-      const res = this.sim.result()
-      this.over = {
-        kind: 'survived',
-        summary: `the stream ended and coherence held — ${res.waves.length} waves served, mean recall ${res.meanCredit.toFixed(2)}`,
-        result: res,
-      }
-    }
+    this.checkOver(ev.death)
 
     // whole-block FLIP: any inline chunk whose top moved slides there
     const afterGeo = computeGeometry(this.buildState(null))

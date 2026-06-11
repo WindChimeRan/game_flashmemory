@@ -31,9 +31,10 @@ test/<module>/ mirrors src
 scripts/       gates runner, tuning sweeps, vhs tapes
 ```
 
-Allowed imports: `game → {sim, bots, pretext, term, content}`;
+Allowed imports: `game → {sim, bots, pretext, term, content, shared}`;
 `bots → sim`; `content → sim (types only)`; `pretext`, `term`, `sim` import
-nothing outside themselves **except `src/shared/`**. Contracts in
+nothing outside themselves **except `src/shared/`** (shared is the width
+authority — never duplicate its tables). Contracts in
 `src/<mod>/types.ts` and everything in `src/shared/` are owned by the
 integrator (do not edit in module work; work around locally + report).
 

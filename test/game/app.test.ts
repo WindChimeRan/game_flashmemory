@@ -207,6 +207,30 @@ describe('GameApp loop', () => {
   })
 })
 
+describe('warp fast-forward', () => {
+  test('warp runs ticks instantly, logs caretaker actions, replay still exact', () => {
+    const term = new FakeTerm()
+    const app = new GameApp({ config: preset('default'), seed: 7, term, rawOut: null, warpTicks: 300 })
+    app.start(0)
+    expect(app.sim.tickNow).toBe(300)
+    expect(app.over).toBeNull()
+    expect(app.actionLog.length).toBeGreaterThan(0) // caretaker evictions recorded
+    expect(replaySim(preset('default'), 7, app.actionLog, 300)).toBe(app.sim.stateHash())
+    app.stop()
+  })
+
+  test('two warped apps agree (warp is deterministic)', () => {
+    const mk = () => {
+      const app = new GameApp({ config: preset('default'), seed: 9, term: new FakeTerm(), rawOut: null, warpTicks: 200 })
+      app.start(0)
+      const h = app.sim.stateHash()
+      app.stop()
+      return h
+    }
+    expect(mk()).toBe(mk())
+  })
+})
+
 describe('death and restart', () => {
   // A viewport this tight OOMs within the first chunks (admission failure).
   const tightCfg: SimConfig = { ...DEFAULTS, viewportLines: 8, roundTicks: 600 }

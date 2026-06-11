@@ -58,10 +58,8 @@ export class DemoApp {
   private accMs = 0
   private lastMs: number | null = null
   private unsub: (() => void) | null = null
-  private readonly ownsTerm: boolean
 
   constructor(opts: DemoOptions) {
-    this.ownsTerm = opts.term === undefined
     this.term = opts.term ?? createTerm({})
     this.allWords = tokenizeParagraphs(opts.text)
     this.totalTokens = this.allWords.reduce((s, w) => s + w.length, 0)

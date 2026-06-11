@@ -10,12 +10,13 @@ describe('parseCli', () => {
   })
 
   test('play defaults and flags', () => {
-    expect(parseCli(['play'])).toEqual({ cmd: 'play', preset: 'default', seed: null })
-    expect(parseCli(['play', '--seed', '7'])).toEqual({ cmd: 'play', preset: 'default', seed: 7 })
-    expect(parseCli(['play', '--preset', 'inferno', '--seed', '42'])).toEqual({
+    expect(parseCli(['play'])).toEqual({ cmd: 'play', preset: 'default', seed: null, warp: 0 })
+    expect(parseCli(['play', '--seed', '7'])).toEqual({ cmd: 'play', preset: 'default', seed: 7, warp: 0 })
+    expect(parseCli(['play', '--preset', 'inferno', '--seed', '42', '--warp', '300'])).toEqual({
       cmd: 'play',
       preset: 'inferno',
       seed: 42,
+      warp: 300,
     })
     expect(() => parseCli(['play', '--preset', 'nightmare'])).toThrow(/unknown preset/)
     expect(() => parseCli(['play', '--seed', 'NaN'])).toThrow(/--seed needs a number/)
