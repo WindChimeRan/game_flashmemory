@@ -117,3 +117,129 @@ _(leave notes here — anything: feel, confusion, fun, frustration)_
   glyphs, or hedge-decay. Knob iterations were deliberately NOT spent on
   this (analyst sweep shows the region is flat); the five passing gates are
   left undisturbed.
+
+- 2026-06-10 late night: **summary-tier decay implemented** (the accepted
+  design response to the gate-2(b) escalation above). **Mechanic addition
+  pending human review — `summaryTTL=Infinity` restores frozen v1.1
+  behavior exactly,** and that is the shipped default (rationale below).
+
+  **Mechanic** (`SimConfig.summaryTTL`, sim tick step −1): a chunk sitting
+  at SUMMARY tier unused for more than `summaryTTL` ticks drops back to
+  chip at the START of a tick (before actions), emitting a
+  `TickEvents.decayed` event; the live counter is exposed as
+  `ChunkView.summaryAgeTicks` and is part of `stateHash` (determinism law).
+  "Used" (counter resets): arrival at summary (transfer completion), the
+  chunk's glyph demanded by a LANDING wave, or the chunk being the target
+  of an accepted up/down. Decay ignores pin and mid-transfer chunks never
+  decay (in-flight is committed, both directions). Paper-faithful: an
+  unused prefetch does not persist past the next trigger window — parked
+  compressed chunks the indexer never re-selects fall back to the cold
+  pool. validateConfig: `summaryTTL > telegraphStd` (a reaction-hedge made
+  at telegraph must survive to the landing) and `summaryTTL > L_warm + 2`;
+  design intent is anti-blanket pressure from `summaryTTL < typical wave
+  gap`, so a standing hedge wall costs recurring actions + bus time.
+  Decay-awareness threaded through the frozen-structure consumers:
+  director feasibility (`greedyClearable` models candidate decay/resets),
+  telegraph viability (gate 5: a warm plan that would start after its
+  summary's decay tick is modeled as a cold restart), OracleBot staging
+  (deadline-aware JIT: releases a slack-rich warm leg before its summary
+  decays UNLESS a post-decay cold restart still fits with margin — it was
+  NOT decay-safe as previously assumed; mid-chain summaries could park past
+  TTL under JIT), and ReactiveBot (decay-correct futility + seamless
+  re-hedge: a replacement leg starts one L_c2s before a hedge dies).
+  **Spec refinement, flagged for review:** the pin ACTION does not reset
+  the counter (the spec's literal "any accepted player action" would let a
+  1-action pin toggle refresh a summary for free every TTL ticks —
+  re-enabling near-free blanket hedging, the exact loophole the spec's own
+  "decay ignores pin" clause closes; same principle applied to both).
+  23 new tests (decay timing edges, all reset conditions, pin/rejection
+  non-resets, mid-transfer immunity both directions, demand-landing reset
+  end-to-end, determinism + replay equality at finite TTL, finite≡Infinity
+  control, hash counter coverage, validateConfig laws, bot decay probes).
+
+  **Strongest-reactive escalation (affects how all gate-2 numbers read):**
+  while A/B-ing wall-maintenance variants for the decay era, a strictly
+  stronger member of the reactive family surfaced: `hedgeHeat 0.45`
+  (old default 0.3). It hedges on the heat ramp ~56 ticks before a landing,
+  so its chip→summary leg arrives just AFTER the telegraph and is expanded
+  immediately — a JIT stager that parks summaries for ~1–2 ticks. Pareto
+  0.45 vs 0.36 (both seed blocks, both metrics' tiebreaks; 0.45–0.48 is a
+  plateau, 0.50 falls off the L_warm cliff). Per §7 ("the strongest member
+  of the reactive family, not the weakest... if a stronger reactive variant
+  is ever found, *it* becomes the gate bot") it is now the fielded default.
+  Consequences: (1) gate 2(a)'s previous PASS (0.65) was an artifact of a
+  sub-strongest bot — against the real adversary it reads 0.82 and FAILS;
+  (2) because this bot parks ~nothing at summary, **summary-tier decay
+  cannot price it at any legal TTL** (`summaryTTL > telegraphStd` is
+  precisely the law that guarantees a use-immediately hedge survives).
+  Decay does what it was designed to do — standing walls now churn and
+  noise-hedges expire — but the strongest reactive play never built a
+  standing wall in the first place; it rides the 90-tick heat horizon.
+  §7's own designated corrective for a stronger reactive variant is
+  `L_warm` pricing — left untouched here (outside the accepted design
+  response; candidate for the next iteration alongside heat-horizon /
+  heat-noise shaping, which bound how early a reactive player can time
+  cold legs without future knowledge).
+
+  **summaryTTL mini-sweep** (50 seeds @4000 ×5 bots, strongest reactive
+  fielded, frozen gate formulations; gaps are reactive−greedy pareto):
+
+  | TTL | greedy surv | greedy pareto | reactive pareto | 2(b) gap | gates |
+  |---|---|---|---|---|---|
+  | 40 | 0.966 | 0.217 | 0.438 | +0.221 | 5/6 (G5 margin 0.92) |
+  | 55 | 0.957 | 0.208 | 0.438 | +0.230 | 5/6 |
+  | 70 | 0.954 | 0.208 | 0.437 | +0.229 | 5/6 |
+  | 90 | 0.959 | 0.206 | 0.438 | +0.232 | 5/6 |
+  | ∞  | 0.965 | 0.204 | 0.441 | +0.237 | 5/6 |
+
+  Confirmation at 100 rounds @1000 (the gate block): TTL 40 and 55 push
+  greedy survival into gate 1's saturation dead band (0.939 / 0.945 < 0.95
+  ⇒ G1+G2 flip to survival ratios ⇒ **4/6**); TTL 70/90 keep 5/6 and shave
+  the 2(b) gap 0.242 → 0.234/0.230, but spend gate 5's margin (legible
+  0.98 → 0.91; one more illegible greedy death fails it on another block)
+  and sit on gate 4's 0.40 ceiling (0.396 vs 0.393). Decay helps GREEDY
+  (garbage-collects its cooling summaries, reopens wave eligibility —
+  credit 0.534→0.555, resid 0.606→0.594 at TTL 40) yet also feeds it more
+  waves to miss, which is what desaturates its survival at low TTL.
+
+  **Decision (protocol step 4): no finite value reaches 6/6; the best
+  finite candidate (90) improves gate 2(b) by ~5% of the needed distance
+  while regressing gate 5's measured margin and gate 1's saturation
+  margin — `DEFAULTS.summaryTTL = Infinity` (mechanic dormant, fully
+  implemented and tested; flip one knob to activate, 90 is the best
+  finite candidate).**
+
+  Full run `bun scripts/gates.ts --rounds 100 --seed 1000` (shipped
+  defaults: summaryTTL ∞, reactive hedgeHeat 0.45):
+
+  ```
+  bot              surv%   credit    resid   pareto      aps       legible%
+  recency           56.9     0.15     0.37     0.06     0.24    89 (89/100)
+  random-k          58.3     0.16     0.46     0.05     0.27    92 (92/100)
+  greedy-heat       95.6     0.55     0.60     0.21     0.68     98 (42/43)
+  reactive         100.0     0.87     0.49     0.45     0.72        — (0/0)
+  oracle           100.0     1.00     0.45     0.55     0.61        — (0/0)
+
+  Gate 1 recency-trap      PASS — recency/oracle=0.57 [surv] (need ≤0.60 ok); oracle≫greedy 0.55 vs 0.21 [pareto] (≥1.15× ok); greedy≫recency 0.96 vs 0.57 [surv] (≥1.15× ok); |recency−random|=0.01 [surv] (≤0.10 ok)
+  Gate 2 commitment        FAIL — reactive/oracle=0.82 [pareto] (need ≤0.70 FAIL); reactive<greedy 0.45 vs 0.21 [pareto] (FAIL)
+  Gate 3 decision-density  PASS — oracle aps=0.61 (need 0.30..1.00)
+  Gate 4 near-miss         PASS — late-window arrivals (reactive+greedy) 831/2114=0.39 (need 0.20..0.40)
+  Gate 5 death-legibility  PASS — legible 42/43=0.98 (need ≥0.90)
+  Gate 6 session-shape     PASS — greedy median 1800 ticks = 180s (need 120..240s)
+
+  ALL GATES: FAIL (5/6)
+  ```
+
+  Robustness probe (50 rounds @2000, ∞ and 90 alike): G3–6 hold (near-miss
+  0.396, legible 0.96, median 180 s); gate 1 sits in its known dead band
+  there (greedy surv 0.948/0.943 < 0.95 — the pre-existing instability
+  flagged in the previous entry, not a decay effect). Residual watch
+  items: (1) gate 4 now reads 0.39–0.40 with the strongest reactive
+  fielded (its JIT arrivals are mostly late-window — arguably the tension
+  the gate wants, but one block from the ceiling); (2) gate 5 greedy
+  legibility dips to ~0.91 whenever decay is active at TTL ≤ 90; (3)
+  oracle decay-safety holds (credit 0.994 at TTL 55 vs 0.995 at ∞, 100
+  rounds). Bot threshold retunes for greedy-heat were measured (evictAt /
+  upHeat grids): every pareto-improving retune drops its survival below
+  the 0.95 saturation bound and breaks gate 1 — kept at evictAt 0.7 /
+  upHeat 0.55, documented here instead of changed.

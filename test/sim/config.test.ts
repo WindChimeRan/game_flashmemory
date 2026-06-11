@@ -20,6 +20,16 @@ describe('config validation', () => {
     expect(() => createSim({ ...DEFAULTS, L_c2s: 10, L_warm: 5 }, 1)).toThrow(/L_cold/)
   })
 
+  test('summaryTTL laws: > telegraphStd, > L_warm + 2; Infinity and in-band finite values valid', () => {
+    // A reaction-hedge made at telegraph must survive to the landing.
+    expect(() => createSim({ ...DEFAULTS, summaryTTL: DEFAULTS.telegraphStd }, 1)).toThrow(/summaryTTL/)
+    // Isolate the L_warm + 2 law (telegraph law satisfied: 29 > 28).
+    expect(() => createSim({ ...DEFAULTS, L_warm: 27, summaryTTL: 29 }, 1)).toThrow(/summaryTTL/)
+    expect(() => createSim({ ...DEFAULTS, summaryTTL: NaN }, 1)).toThrow(/summaryTTL/)
+    expect(() => createSim({ ...DEFAULTS, summaryTTL: Infinity }, 1)).not.toThrow()
+    expect(() => createSim({ ...DEFAULTS, summaryTTL: 29 }, 1)).not.toThrow()
+  })
+
   test('protectedChunks < 1 and B < 1 rejected, both listed', () => {
     let msg = ''
     try {

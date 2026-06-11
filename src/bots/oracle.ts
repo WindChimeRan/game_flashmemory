@@ -48,6 +48,12 @@ interface Job {
   /** True when this fetch can only reach summary by land (partial credit). */
   degraded: boolean
   cost: number
+  /**
+   * Latest tick the first action can be processed before the source
+   * summary decays (summaryTTL). Infinity for chip-sourced jobs and at
+   * summaryTTL = Infinity — the decay-release trigger then never fires.
+   */
+  deadline: number
   /** Projected start tick under the B-slot + 1-action/tick schedule. */
   start: number
   slack: number
@@ -64,6 +70,7 @@ export class OracleBot implements OomBot {
   private L_c2s = 40
   private L_warm = 14
   private B = 2
+  private summaryTTL = Infinity
 
   constructor(opts?: OracleOptions) {
     this.maxResidency = Math.min(1, Math.max(0, opts?.maxResidency ?? 1))
@@ -82,6 +89,7 @@ export class OracleBot implements OomBot {
     this.L_c2s = cfg.L_c2s
     this.L_warm = cfg.L_warm
     this.B = cfg.B
+    this.summaryTTL = cfg.summaryTTL
   }
 
   reset(_seed: number): void {
@@ -161,23 +169,42 @@ export class OracleBot implements OomBot {
       if (c.protected) continue
       const cost = c.linesByTier[2]
       if (c.transfer) {
-        // Mid-chain to summary: the warm continuation is the job.
+        // Mid-chain to summary: the warm continuation is the job. The
+        // arrival resets the decay counter, so the continuation must be
+        // processed by arrive + summaryTTL (decay-safety, summaryTTL).
         if (c.transfer.toTier === 1) {
           const gate = c.transfer.arriveTick + 1
           if (gate + this.L_warm <= land)
-            consider({ glyph, chunkId: c.id, gate, lat: this.L_warm, land, degraded: false, cost, start: 0, slack: 0 })
+            consider({
+              glyph, chunkId: c.id, gate, lat: this.L_warm, land, degraded: false, cost,
+              deadline: c.transfer.arriveTick + this.summaryTTL, start: 0, slack: 0,
+            })
         }
         continue
       }
       const gate = now + 1
-      if (c.tier === 1) {
+      // Latest processable tick before this summary decays; an action at
+      // tick τ still sees the summary iff summaryAgeTicks + (τ − now) ≤ TTL.
+      const deadline = now + (this.summaryTTL - c.summaryAgeTicks)
+      if (c.tier === 1 && deadline >= gate) {
         if (gate + this.L_warm <= land)
-          consider({ glyph, chunkId: c.id, gate, lat: this.L_warm, land, degraded: false, cost, start: 0, slack: 0 })
-      } else if (c.tier === 0) {
+          consider({
+            glyph, chunkId: c.id, gate, lat: this.L_warm, land, degraded: false, cost,
+            deadline, start: 0, slack: 0,
+          })
+      } else if (c.tier === 0 || c.tier === 1) {
+        // Chip — or a summary that decays before any action can reach it
+        // (the up processed next tick lands on the freshly-decayed chip).
         if (gate + this.chainLat(0) <= land)
-          consider({ glyph, chunkId: c.id, gate, lat: this.chainLat(0), land, degraded: false, cost, start: 0, slack: 0 })
+          consider({
+            glyph, chunkId: c.id, gate, lat: this.chainLat(0), land, degraded: false, cost,
+            deadline: Infinity, start: 0, slack: 0,
+          })
         else if (gate + this.L_c2s <= land)
-          consider({ glyph, chunkId: c.id, gate, lat: this.L_c2s, land, degraded: true, cost, start: 0, slack: 0 })
+          consider({
+            glyph, chunkId: c.id, gate, lat: this.L_c2s, land, degraded: true, cost,
+            deadline: Infinity, start: 0, slack: 0,
+          })
       }
     }
     return best
@@ -197,10 +224,14 @@ export class OracleBot implements OomBot {
     while (slots.length < this.B) slots.push(now + 1)
     while (slots.length > this.B) slots.pop()
 
+    // Latest-start time additionally caps at the decay deadline: a parked
+    // summary's warm leg must start before the summary decays (summaryTTL),
+    // even when its landing-derived slack is generous.
+    const lst = (j: Job): number => Math.min(j.land - j.lat, j.deadline)
     jobs.sort(
       (a, b) =>
         Number(a.degraded) - Number(b.degraded) ||
-        a.land - a.lat - (b.land - b.lat) ||
+        lst(a) - lst(b) ||
         a.land - b.land ||
         a.cost - b.cost ||
         a.chunkId - b.chunkId,
@@ -238,8 +269,11 @@ export class OracleBot implements OomBot {
       if (!canDown(c) || keep.has(c.id)) continue
       const d = oracle.nextDemandByChunk.get(c.id) ?? Infinity
       if (!relax && d !== Infinity) {
-        // Re-fetch latency if we tier this chunk down one step now.
-        const refetch = c.tier === 2 ? this.L_warm + 1 : this.chainLat(0) + 1
+        // Re-fetch latency if we tier this chunk down one step now. A
+        // downed expanded chunk re-fetches via the warm leg only if its
+        // summary survives to the demand (summaryTTL); else cold chain.
+        const viaSummary = c.tier === 2 && d - now <= this.summaryTTL
+        const refetch = viaSummary ? this.L_warm + 1 : this.chainLat(0) + 1
         if (d - now <= refetch + this.safety + 8) continue
       }
       if (
@@ -275,12 +309,21 @@ export class OracleBot implements OomBot {
     // banked partial credit, and (b) released in EDF order, spending the
     // urgent chain's last tick on a slack-rich earlier-landing warm leg.
     const band = this.safety + this.jitGrace
-    // suffixTight[i]: jobs[i..] contains a job with slack ≤ band. Monotone
-    // (non-increasing along i), so the release loop can stop at the first
-    // position whose whole suffix is slack-rich.
+    // Decay pressure (summaryTTL): a summary-sourced job nearing its decay
+    // deadline must release even when slack-rich — UNLESS letting it decay
+    // and redoing the fetch cold still lands with the safety margin, in
+    // which case decaying is the cheaper play (the chip costs 0 lines now;
+    // the cold chain is re-planned once the chunk actually decays). Dead
+    // code at summaryTTL = Infinity (deadline = Infinity).
+    const decayPressed = (j: Job): boolean =>
+      j.deadline - (now + 1) <= this.jitGrace &&
+      j.deadline + 2 + this.chainLat(0) + this.safety > j.land
+    // suffixTight[i]: jobs[i..] contains a job with slack ≤ band (or decay-
+    // pressed). Monotone (non-increasing along i), so the release loop can
+    // stop at the first position whose whole suffix is slack-rich.
     const suffixTight: boolean[] = new Array<boolean>(jobs.length)
     for (let i = jobs.length - 1, t = false; i >= 0; i--) {
-      if (jobs[i]!.slack <= band) t = true
+      if (jobs[i]!.slack <= band || decayPressed(jobs[i]!)) t = true
       suffixTight[i] = t
     }
     for (let i = 0; i < jobs.length; i++) {

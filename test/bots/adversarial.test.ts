@@ -38,6 +38,7 @@ interface ChunkLite {
   protected?: boolean
   transfer?: TransferState | null
   expandedLines?: number
+  summaryAgeTicks?: number
 }
 
 function makeChunks(specs: readonly ChunkLite[]): ChunkView[] {
@@ -57,6 +58,7 @@ function makeChunks(specs: readonly ChunkLite[]): ChunkView[] {
       pinned: s.pinned ?? false,
       protected: s.protected ?? false,
       transfer,
+      summaryAgeTicks: tier === 1 ? s.summaryAgeTicks ?? 0 : 0,
       linesByTier: byTier,
       linesNow,
       ageTicks: 500,

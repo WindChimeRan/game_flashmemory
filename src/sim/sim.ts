@@ -2,6 +2,11 @@
  * Deterministic game core (OOM_DESIGN.md §4, §5.3; contract src/sim/types.ts).
  *
  * Tick order (fixed):
+ *  −1. summary-tier decay: summaries unused > summaryTTL drop to chip
+ *      BEFORE actions (a decayed summary cannot be expanded this tick).
+ *      Pin is IGNORED (pin guards misclicks, not the cache's nature) and
+ *      mid-transfer chunks never decay (in-flight is committed, both
+ *      directions). summaryTTL = Infinity ⇒ step is a no-op (frozen v1.1).
  *   0. accept ≤ actionBudget actions in order (validate → accept/reject)
  *   1. advance transfers, fire arrivals at arriveTick
  *   2. stream: newest chunk +1 token; finished → schedule next spawn
@@ -10,6 +15,12 @@
  *   5. heat / pips update (per-chunk forked rng streams)
  *   6. zen scoring accrual
  *   7. meters, residency running mean, evictability bookkeeping
+ *
+ * Summary relevance (decay counter) resets on: arrival at summary, the
+ * chunk's glyph being demanded by a LANDING wave, or the chunk being the
+ * target of an accepted up/down. Pin actions do NOT reset it — a 1-action
+ * pin refresh would re-enable near-free blanket hedging, the loophole the
+ * mechanic exists to price (same rationale as decay ignoring pin state).
  *
  * Line accounting: chip 0, summary 1, expanded max(1, ceil(tokens/perLine));
  * a transferring chunk counts max(current, target) from transfer START
@@ -52,6 +63,8 @@ interface ChunkInt {
   heat: number
   pips: number
   phantomTick: number
+  /** Tick of last summary relevance (decay counter origin; hashed). */
+  lastRelevant: number
   /** Ticks at which heat was ≥ HEAT_WARN_LEVEL — death attribution only
    *  (gate #5 heat-warning legibility, see attribution.ts); not hashed
    *  (fully derived from the hashed heat stream). */
@@ -103,6 +116,7 @@ const EMPTY_EVENTS: TickEvents = Object.freeze({
   accepted: Object.freeze([]),
   rejected: Object.freeze([]),
   arrivals: Object.freeze([]),
+  decayed: Object.freeze([]),
   resolved: Object.freeze([]),
   spawned: Object.freeze([]),
   telegraphed: Object.freeze([]),
@@ -205,13 +219,28 @@ class SimImpl implements Sim {
     const accepted: Action[] = []
     const rejected: { action: Action; reason: RejectReason }[] = []
     const arrivals: { chunkId: number; tier: Tier }[] = []
+    const decayed: { chunkId: number }[] = []
     const resolvedEv: WaveResolution[] = []
     const spawned: number[] = []
     const telegraphed: number[] = []
     const mk = (): TickEvents => ({
-      accepted, rejected, arrivals, resolved: resolvedEv,
+      accepted, rejected, arrivals, decayed, resolved: resolvedEv,
       spawned, telegraphed, death: this.death,
     })
+
+    // −1. summary-tier decay (summaryTTL) — BEFORE actions, so a decayed
+    //     summary cannot be expanded this tick. Pin is ignored by design
+    //     (pin guards against your own misclicks, not the cache's nature —
+    //     otherwise pin re-enables free blanket hedging); mid-transfer
+    //     chunks never decay (in-flight is committed, both directions).
+    //     Protected chunks are never at summary (they spawn expanded and
+    //     reject tier actions), so no guard is needed here.
+    for (const c of this.chunks) {
+      if (c.tier === 1 && !c.transfer && now - c.lastRelevant > cfg.summaryTTL) {
+        c.tier = 0
+        decayed.push({ chunkId: c.id })
+      }
+    }
 
     // 0. actions — only accepted ones consume the budget.
     for (const a of actions) {
@@ -238,6 +267,7 @@ class SimImpl implements Sim {
         const prevServing = this.glyphBestTier(c.glyph)
         c.tier = newTier
         c.transfer = null
+        if (newTier === 1) c.lastRelevant = now // arrival at summary resets decay
         arrivals.push({ chunkId: c.id, tier: newTier })
         if (newTier > prevServing) {
           for (const w of this.waves) {
@@ -277,6 +307,7 @@ class SimImpl implements Sim {
         heat: HEAT_IDLE,
         pips: 1,
         phantomTick: 0,
+        lastRelevant: now,
         warnLog: [],
       }
       if (plan.distractor) {
@@ -321,7 +352,10 @@ class SimImpl implements Sim {
         telegraphed.push(w.id)
         w.viability = snapshotViability(
           cfg, now, w,
-          this.chunks.map((c) => ({ id: c.id, glyph: c.glyph, tier: c.tier, transfer: c.transfer })),
+          this.chunks.map((c) => ({
+            id: c.id, glyph: c.glyph, tier: c.tier, transfer: c.transfer,
+            summaryAgeTicks: c.tier === 1 ? now - c.lastRelevant : 0,
+          })),
           this.busArrivals(),
         )
       }
@@ -329,6 +363,11 @@ class SimImpl implements Sim {
     for (const w of this.waves) {
       if (this.doneFlag) break
       if (!w.resolved && w.landTick === now) {
+        // A landing demand is relevance: reset the decay counter of every
+        // chunk of the demanded glyphs (effective only for summaries).
+        for (const c of this.chunks) {
+          if (w.glyphs.includes(c.glyph)) c.lastRelevant = now
+        }
         const res = this.resolveWave(w)
         resolvedEv.push(res)
         this.resolutions.push(res)
@@ -386,6 +425,7 @@ class SimImpl implements Sim {
         if (this.totalLines() + delta > cfg.viewportLines) return 'no-headroom'
         const L = c.tier === 0 ? cfg.L_c2s : cfg.L_warm
         c.transfer = { toTier: to, startTick: now, arriveTick: now + L }
+        c.lastRelevant = now // accepted tier action resets the decay counter
         return null
       }
       case 'down': {
@@ -394,11 +434,15 @@ class SimImpl implements Sim {
         if (c.transfer) return 'transferring'
         if (c.tier === 0) return 'at-bottom'
         c.tier = (c.tier - 1) as Tier
+        c.lastRelevant = now // accepted tier action resets the decay counter
         return null
       }
       case 'pin': {
         if (prot) return 'protected'
         c.pinned = !c.pinned
+        // Deliberately NO lastRelevant reset: pin is metadata, not use of
+        // the cached data — a 1-action pin refresh would re-enable
+        // near-free blanket hedging (see tick-order doc above).
         return null
       }
     }
@@ -481,6 +525,7 @@ class SimImpl implements Sim {
       protected: this.isProtected(c),
       expandedCost: this.expandedCost(c),
       linesNow: this.linesNow(c),
+      summaryAgeTicks: c.tier === 1 ? now - c.lastRelevant : 0,
     }))
     const activeWaves: ActiveDemand[] = []
     for (const w of this.waves) {
@@ -507,6 +552,7 @@ class SimImpl implements Sim {
       pinned: c.pinned,
       protected: this.isProtected(c),
       transfer: c.transfer,
+      summaryAgeTicks: c.tier === 1 ? now - c.lastRelevant : 0,
       linesByTier,
       linesNow: this.linesNow(c),
       ageTicks: now - c.spawnTick,
@@ -596,6 +642,7 @@ class SimImpl implements Sim {
       h = fnvFloat(h, c.heat)
       h = fnvInt(h, c.pips)
       h = fnvInt(h, c.phantomTick)
+      h = fnvInt(h, c.lastRelevant) // decay counter (determinism law)
     }
     h = fnvFloat(h, this.coherence)
     h = fnvFloat(h, this.score)

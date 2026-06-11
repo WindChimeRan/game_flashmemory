@@ -122,6 +122,7 @@ export function chunk(c: ChunkSpecLite): ChunkView {
     pinned: c.pinned ?? false,
     protected: c.protected ?? false,
     transfer,
+    summaryAgeTicks: 0,
     linesByTier,
     linesNow,
     ageTicks: 100,

@@ -204,6 +204,7 @@ describe('greedyClearable adversarial cases', () => {
     protected: false,
     expandedCost,
     linesNow: tier === 0 ? 0 : tier === 1 ? 1 : expandedCost,
+    summaryAgeTicks: 0,
   })
   const CFG: SimConfig = { ...DEFAULTS, B: 1, actionBudget: 2, L_c2s: 40, L_warm: 14 }
   const world: DirectorWorld = {

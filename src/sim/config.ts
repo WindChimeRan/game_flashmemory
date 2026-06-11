@@ -44,6 +44,25 @@ export interface SimConfig {
   B: number
   /** Player/bot actions accepted per tick. */
   actionBudget: number
+  /**
+   * Summary-tier decay (gate-2(b) mechanic, PLAYTEST.md 2026-06-10): a chunk
+   * sitting at SUMMARY tier unused for more than `summaryTTL` ticks drops
+   * back to chip at the START of a tick (before actions), emitting a
+   * `decayed` event. "Used" resets the counter: arriving at summary
+   * (transfer completion), its glyph being demanded by a LANDING wave, or
+   * being the target of an accepted tier action (up/down — NOT pin: pin
+   * guards against your own misclicks, not the cache's nature, and a free
+   * 1-action pin refresh would re-enable blanket hedging, the exact
+   * loophole this knob prices). Mid-transfer chunks never decay (in-flight
+   * is committed, both directions). Paper-faithful: unused prefetches do
+   * not persist past the next trigger window. `Infinity` disables decay and
+   * reproduces frozen v1.1 behavior exactly.
+   *
+   * Design intent: anti-blanket pressure comes from summaryTTL < typical
+   * wave gap (waveGapMin..Max), so maintaining a standing hedge wall costs
+   * recurring actions + bus time instead of being a one-time purchase.
+   */
+  summaryTTL: number
 
   // ── waves (§4.4) ────────────────────────────────────────────────────
   telegraphStd: number
@@ -130,6 +149,15 @@ export const DEFAULTS: SimConfig = {
   L_warm: 14,
   B: 2,
   actionBudget: 1,
+  // Infinity = mechanic dormant (exact frozen v1.1 behavior). The
+  // 2026-06-10 sweep (PLAYTEST.md) found no finite value that fixes gate
+  // 2(b): the strongest reactive variant (hedgeHeat 0.45) parks summaries
+  // for ~1–2 ticks only, so decay cannot price it, while TTL ≤ 55 pushes
+  // greedy-heat's survival into gate 1's saturation dead band and TTL
+  // 70–90 buys a ~0.01 pareto-gap improvement at the cost of most of gate
+  // 5's margin (0.98 → 0.91). Flip to a finite value (> telegraphStd,
+  // > L_warm + 2; 90 was the best finite candidate) to activate decay.
+  summaryTTL: Infinity,
 
   telegraphStd: 28,
   telegraphBoss: 120,
@@ -214,6 +242,16 @@ export function validateConfig(c: SimConfig): string[] {
     errs.push(`L_cold (${c.L_c2s + c.L_warm}) must exceed telegraphStd (${c.telegraphStd})`)
   if (c.L_warm >= c.telegraphStd)
     errs.push(`L_warm (${c.L_warm}) must be below telegraphStd (${c.telegraphStd})`)
+  // Decay laws: a reaction-hedge made at telegraph time must survive to the
+  // landing (else the warm path the commitment structure prices is dead on
+  // arrival), and a freshly-arrived summary must comfortably outlive one
+  // warm continuation (arrival reset + 1-tick handoff + L_warm). The
+  // anti-blanket pressure is meant to come from summaryTTL < typical wave
+  // gap, NOT from breaking the telegraph-reaction loop itself.
+  if (!(c.summaryTTL > c.telegraphStd))
+    errs.push(`summaryTTL (${c.summaryTTL}) must exceed telegraphStd (${c.telegraphStd})`)
+  if (!(c.summaryTTL > c.L_warm + 2))
+    errs.push(`summaryTTL (${c.summaryTTL}) must exceed L_warm + 2 (${c.L_warm + 2})`)
   if (c.protectedChunks < 1) errs.push('protectedChunks ≥ 1')
   if (c.B < 1) errs.push('B ≥ 1')
   return errs

@@ -18,6 +18,9 @@
  *                    the telegraph fired: a warm (summary) chunk could
  *                    expand in time, or a bus slot freed early enough for
  *                    the needed fetch chain. Snapshot taken at telegraph.
+ *                    Decay-aware (summaryTTL): a warm plan whose start
+ *                    would slip past the summary's decay tick is modeled
+ *                    as a cold restart from the decayed chip.
  */
 
 import type { SimConfig } from './config'
@@ -57,6 +60,8 @@ export interface ViabilityChunk {
   readonly glyph: string
   readonly tier: Tier
   readonly transfer: { readonly toTier: Tier; readonly arriveTick: number } | null
+  /** Decay counter (0 unless at summary) — viability models summaryTTL. */
+  readonly summaryAgeTicks: number
 }
 
 /**
@@ -79,7 +84,16 @@ export function snapshotViability(
 
   const need = needCount(wave.sufficientExpandedFrac, wave.glyphs.length)
   let served = 0
-  const todo: { glyph: string; lat: number; gate: number; via: string; chunkId: number }[] = []
+  interface Plan {
+    glyph: string
+    lat: number
+    gate: number
+    /** Latest start tick before the source summary decays (∞ = no decay). */
+    deadline: number
+    via: string
+    chunkId: number
+  }
+  const todo: Plan[] = []
 
   for (const g of wave.glyphs) {
     const mine = chunks.filter((c) => c.glyph === g)
@@ -89,17 +103,29 @@ export function snapshotViability(
       continue
     }
     // Best reachable plan per chunk: (gate = earliest start tick, lat = busy span once started)
-    let best: { lat: number; gate: number; via: string; chunkId: number } | null = null
+    let best: Omit<Plan, 'glyph'> | null = null
     for (const c of mine) {
-      let cand: { lat: number; gate: number; via: string; chunkId: number } | null = null
+      let cand: Omit<Plan, 'glyph'> | null = null
       if (c.transfer) {
         if (c.transfer.toTier === 1) {
-          cand = { lat: cfg.L_warm, gate: c.transfer.arriveTick + 1, via: `chunk #${c.id} arriving warm`, chunkId: c.id }
+          // Arrival resets the decay counter: summary until arrive + TTL.
+          cand = {
+            lat: cfg.L_warm, gate: c.transfer.arriveTick + 1,
+            deadline: c.transfer.arriveTick + cfg.summaryTTL,
+            via: `chunk #${c.id} arriving warm`, chunkId: c.id,
+          }
         }
       } else if (c.tier === 1) {
-        cand = { lat: cfg.L_warm, gate: now + 1, via: `warm chunk #${c.id}`, chunkId: c.id }
+        cand = {
+          lat: cfg.L_warm, gate: now + 1,
+          deadline: now + (cfg.summaryTTL - c.summaryAgeTicks),
+          via: `warm chunk #${c.id}`, chunkId: c.id,
+        }
       } else if (c.tier === 0) {
-        cand = { lat: cfg.L_c2s + 1 + cfg.L_warm, gate: now + 1, via: `cold chunk #${c.id}`, chunkId: c.id }
+        cand = {
+          lat: cfg.L_c2s + 1 + cfg.L_warm, gate: now + 1, deadline: Infinity,
+          via: `cold chunk #${c.id}`, chunkId: c.id,
+        }
       }
       if (cand && (!best || cand.lat + cand.gate < best.lat + best.gate)) best = cand
     }
@@ -113,13 +139,21 @@ export function snapshotViability(
     if (served >= need) break
     slots.sort((a, b) => a - b)
     const s = Math.max(slots[0] ?? now + 1, t.gate)
-    const done = s + t.lat
+    let lat = t.lat
+    let via = t.via
+    if (s > t.deadline) {
+      // The summary decays before this start can happen (summaryTTL):
+      // model the honest fallback — a cold restart from the decayed chip.
+      lat = cfg.L_c2s + 1 + cfg.L_warm
+      via = `${t.via} (decays t${t.deadline + 1}; cold restart)`
+    }
+    const done = s + lat
     if (done <= wave.landTick) {
       served++
       slots[0] = done + 1
-      notes.push(`${t.via} [${t.glyph}] could land t${done} ≤ t${wave.landTick}`)
+      notes.push(`${via} [${t.glyph}] could land t${done} ≤ t${wave.landTick}`)
     } else {
-      notes.push(`${t.via} [${t.glyph}] lands t${done} > t${wave.landTick}`)
+      notes.push(`${via} [${t.glyph}] lands t${done} > t${wave.landTick}`)
     }
   }
 

@@ -75,6 +75,14 @@ export interface ChunkView {
   /** In the protected strip (newest chunks; untouchable). */
   readonly protected: boolean
   readonly transfer: TransferState | null
+  /**
+   * Ticks since this summary was last relevant (0 at any other tier).
+   * Relevance resets: arrival at summary, glyph demanded by a landing wave,
+   * or being the target of an accepted up/down. When it exceeds
+   * cfg.summaryTTL the chunk decays to chip at the start of a tick
+   * (mid-transfer chunks never decay; pin does not protect).
+   */
+  readonly summaryAgeTicks: number
   /** Line cost at each tier: [chip, summary, expanded]. chip = 0. */
   readonly linesByTier: readonly [number, number, number]
   /** Lines currently counted against the viewport (incl. reservation). */
@@ -150,6 +158,8 @@ export interface TickEvents {
   readonly rejected: readonly { action: Action; reason: RejectReason }[]
   /** Transfers that arrived this tick (chunkId, new tier). */
   readonly arrivals: readonly { chunkId: number; tier: Tier }[]
+  /** Summaries that decayed to chip at the start of this tick (summaryTTL). */
+  readonly decayed: readonly { chunkId: number }[]
   /** Waves resolved this tick. */
   readonly resolved: readonly WaveResolution[]
   /** New chunk began streaming. */

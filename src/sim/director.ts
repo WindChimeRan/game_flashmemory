@@ -40,6 +40,8 @@ export interface DirectorChunk {
   readonly protected: boolean
   readonly expandedCost: number
   readonly linesNow: number
+  /** Decay counter (0 unless at summary) — feasibility models summaryTTL. */
+  readonly summaryAgeTicks: number
 }
 
 export interface ActiveDemand {
@@ -87,7 +89,10 @@ export function greedyClearable(
   const maxLand = Math.max(...demands.map((d) => d.landTick))
 
   // One candidate chunk per (glyph) — shared across waves demanding it.
-  const byGlyph = new Map<string, { tier: number; busyTo: number; toTier: number; nextOk: number }>()
+  const byGlyph = new Map<
+    string,
+    { tier: number; busyTo: number; toTier: number; nextOk: number; decayAt: number }
+  >()
   const want = new Set<string>()
   for (const d of demands) for (const g of d.glyphs) want.add(g)
   for (const g of want) {
@@ -109,6 +114,13 @@ export function greedyClearable(
       busyTo: best.transferTo !== null ? best.transferArrive : -1,
       toTier: best.transferTo !== null ? best.transferTo : best.tier,
       nextOk: world.now + 1,
+      // First simulated tick this candidate's summary is gone (sim decays
+      // when age > summaryTTL at the start of a tick). Infinity unless the
+      // candidate sits at summary right now; arrivals below refresh it.
+      decayAt:
+        best.transferTo === null && best.tier === 1
+          ? world.now + (cfg.summaryTTL - best.summaryAgeTicks) + 1
+          : Infinity,
     })
   }
 
@@ -130,6 +142,10 @@ export function greedyClearable(
     [...d.glyphs].sort((a, b) => (byGlyph.get(b)?.tier ?? -1) - (byGlyph.get(a)?.tier ?? -1) || (a < b ? -1 : 1))
 
   for (let t = world.now + 1; t <= maxLand; t++) {
+    // step −1 analog: summary decay before starts (mid-transfer immune).
+    for (const st of byGlyph.values()) {
+      if (st.busyTo < t && st.tier === 1 && t >= st.decayAt) st.tier = 0
+    }
     // step 0 analog: starts (a chunk arriving this tick is still busy here)
     let budget = cfg.actionBudget
     const occupied = (): number => {
@@ -161,19 +177,25 @@ export function greedyClearable(
         if (servedNow >= d.needCount) break
       }
     }
-    // step 1 analog: arrivals
+    // step 1 analog: arrivals (arrival at summary resets the decay counter)
     for (const st of byGlyph.values()) {
       if (st.busyTo === t) {
         st.tier = st.toTier
         st.busyTo = -1
         st.nextOk = t + 1
+        st.decayAt = st.tier === 1 ? t + cfg.summaryTTL + 1 : Infinity
       }
     }
-    // land checks (resolution happens after arrivals on the land tick)
+    // land checks (resolution happens after arrivals on the land tick);
+    // a landing demand is relevance — it refreshes its glyphs' summaries.
     for (const d of edf) {
       if (d.landTick !== t) continue
       let served = 0
-      for (const g of d.glyphs) if (byGlyph.get(g)!.tier === 2) served++
+      for (const g of d.glyphs) {
+        const st = byGlyph.get(g)!
+        if (st.tier === 2) served++
+        if (st.busyTo < t && st.tier === 1) st.decayAt = t + cfg.summaryTTL + 1
+      }
       if (served < d.needCount) return false
     }
   }
