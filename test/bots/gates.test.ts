@@ -30,8 +30,8 @@ describe('scripts/gates.ts end-to-end', () => {
       expect([0, 1]).toContain(proc.exitCode)
       expect(err).toBe('')
 
-      // Table + verdicts present.
-      for (const bot of ['recency', 'random-k', 'greedy-heat', 'reactive', 'oracle']) {
+      // Table + verdicts present (all SIX bots incl. the par line).
+      for (const bot of ['recency', 'random-k', 'greedy-heat', 'reactive', 'par', 'oracle']) {
         expect(out).toContain(bot)
       }
       for (let g = 1; g <= 6; g++) expect(out).toContain(`Gate ${g} `)
@@ -51,7 +51,7 @@ describe('scripts/gates.ts end-to-end', () => {
       expect(payload.rounds).toBe(10)
       expect(payload.seedStart).toBe(4000)
       expect(Object.keys(payload.bots).sort()).toEqual(
-        ['greedy-heat', 'oracle', 'random-k', 'reactive', 'recency'].sort(),
+        ['greedy-heat', 'oracle', 'par', 'random-k', 'reactive', 'recency'].sort(),
       )
       for (const b of Object.values(payload.bots)) {
         expect(b.rounds).toBe(10)

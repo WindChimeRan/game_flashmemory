@@ -14,7 +14,7 @@ const SEEDS = [11, 22, 33, 44, 55]
 describe('bot roster: completion + determinism', () => {
   const rosterA = makeRoster()
   const rosterB = makeRoster()
-  expect(rosterA.map((b) => b.name)).toEqual(['recency', 'random-k', 'greedy-heat', 'reactive', 'oracle'])
+  expect(rosterA.map((b) => b.name)).toEqual(['recency', 'random-k', 'greedy-heat', 'reactive', 'par', 'oracle'])
 
   for (let i = 0; i < rosterA.length; i++) {
     const botA = rosterA[i]!

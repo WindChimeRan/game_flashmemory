@@ -1,11 +1,14 @@
 /**
  * Bot behavior under summary-tier decay (summaryTTL):
- *  - ReactiveBot maintains its hedge wall: a dying hedge (remaining life <
- *    rehedgeLead) triggers a sibling chip's replacement leg BEFORE the gap
- *    opens; at summaryTTL = Infinity the same view produces no action.
- *  - ReactiveBot Phase-B futility is decay-correct: a telegraphed summary
- *    that decays before the action would process is treated as the chip it
- *    is about to become (no wasted up inside a standard telegraph window).
+ *  - ReactiveBot (heat-blind) maintains its blind wall: a dying summary
+ *    (remaining life < rehedgeLead) triggers a sibling chip's replacement
+ *    leg BEFORE the gap opens; at summaryTTL = Infinity the same view
+ *    produces no action. Its react futility is decay-correct: a telegraphed
+ *    summary that decays before the action would process is treated as the
+ *    chip it is about to become (no wasted up inside a standard window).
+ *  - ParBot (the promoted heat+telegraph hybrid) keeps the same decay
+ *    behaviors it had as the old reactive: seamless heat-hedge re-walling
+ *    and decay-correct Phase-B futility.
  *  - OracleBot chain staging is decay-safe: a slack-rich warm job releases
  *    when its decay deadline nears IF a post-decay cold restart cannot make
  *    the landing; when the cold restart fits comfortably it deliberately
@@ -24,7 +27,7 @@ import {
   type TransferState,
   type WaveView,
 } from '../../src/sim'
-import { OracleBot, ReactiveBot, runRoundDetailed } from '../../src/bots'
+import { OracleBot, ParBot, ReactiveBot, runRoundDetailed } from '../../src/bots'
 
 const TTL40: SimConfig = { ...DEFAULTS, summaryTTL: 40 }
 
@@ -112,6 +115,13 @@ function reactive(cfg: SimConfig): ReactiveBot {
   return bot
 }
 
+function par(cfg: SimConfig): ParBot {
+  const bot = new ParBot()
+  bot.configure(cfg)
+  bot.reset(1)
+  return bot
+}
+
 function oracle(cfg: SimConfig): OracleBot {
   const bot = new OracleBot()
   bot.configure(cfg)
@@ -119,27 +129,28 @@ function oracle(cfg: SimConfig): OracleBot {
   return bot
 }
 
-// ── ReactiveBot ──────────────────────────────────────────────────────────
+// ── ReactiveBot (heat-blind) ─────────────────────────────────────────────
 
-describe('ReactiveBot wall maintenance under decay', () => {
-  // Glyph A is hot and hedged, but the hedge is 4 ticks from decaying
-  // (age 36, TTL 40) — within rehedgeLead (L_c2s + 2): the bot must start
-  // the sibling chip's replacement leg now, before the wall gap opens.
+describe('ReactiveBot blind-wall maintenance under decay', () => {
+  // Glyph A's wall summary is 4 ticks from decaying (age 36, TTL 40) —
+  // within rehedgeLead (L_c2s + 2): the bot must start the sibling chip's
+  // replacement leg now, before the wall gap opens (the in-flight transfer
+  // covers std-wave eligibility while the old summary dies).
   const chunks = makeChunks([
     { glyph: 'A', tier: 1, heat: 0.6, pips: 3, summaryAgeTicks: 36 },
     { glyph: 'A', tier: 0, heat: 0.6, pips: 3 },
     { glyph: 'Z', tier: 2, protected: true, expandedLines: 5 },
   ])
 
-  test('seamless re-hedge: dying hedge triggers the sibling chip replacement leg', () => {
+  test('seamless repair: dying wall summary triggers the sibling chip replacement leg', () => {
     expect(reactive(TTL40).act(makeView(100, chunks), null)).toEqual([{ kind: 'up', chunkId: 1 }])
   })
 
-  test('same view at summaryTTL = Infinity: the standing hedge suffices, no action', () => {
+  test('same view at summaryTTL = Infinity: the standing wall suffices, no action', () => {
     expect(reactive(DEFAULTS).act(makeView(100, chunks), null)).toEqual([])
   })
 
-  test('after the decay (chip again), the hot glyph is simply re-hedged', () => {
+  test('after the decay (chip again), the covered glyph is simply re-walled', () => {
     const after = makeChunks([
       { glyph: 'A', tier: 0, heat: 0.6, pips: 3 },
       { glyph: 'Z', tier: 2, protected: true, expandedLines: 5 },
@@ -148,7 +159,7 @@ describe('ReactiveBot wall maintenance under decay', () => {
   })
 })
 
-describe('ReactiveBot Phase-B decay-correct futility', () => {
+describe('ReactiveBot react decay-correct futility', () => {
   const mk = (age: number): SimView => {
     const w = wave(0, ['A'], 100, 127) // standard window: land = telegraph + 27
     return makeView(100, makeChunks([
@@ -165,6 +176,50 @@ describe('ReactiveBot Phase-B decay-correct futility', () => {
     // The up would land on the decayed chip: L_c2s (41 > 27) can no longer
     // help this wave — the strongest reactive play is to not waste the bus.
     expect(reactive(TTL40).act(mk(40), null)).toEqual([])
+  })
+})
+
+// ── ParBot (heat-hedge decay behaviors inherited from the old reactive) ──
+
+describe('ParBot hedge-wall maintenance under decay', () => {
+  const chunks = makeChunks([
+    { glyph: 'A', tier: 1, heat: 0.6, pips: 3, summaryAgeTicks: 36 },
+    { glyph: 'A', tier: 0, heat: 0.6, pips: 3 },
+    { glyph: 'Z', tier: 2, protected: true, expandedLines: 5 },
+  ])
+
+  test('seamless re-hedge: dying hedge triggers the sibling chip replacement leg', () => {
+    expect(par(TTL40).act(makeView(100, chunks), null)).toEqual([{ kind: 'up', chunkId: 1 }])
+  })
+
+  test('same view at summaryTTL = Infinity: the standing hedge suffices, no action', () => {
+    expect(par(DEFAULTS).act(makeView(100, chunks), null)).toEqual([])
+  })
+
+  test('after the decay (chip again), the hot glyph is simply re-hedged', () => {
+    const after = makeChunks([
+      { glyph: 'A', tier: 0, heat: 0.6, pips: 3 },
+      { glyph: 'Z', tier: 2, protected: true, expandedLines: 5 },
+    ])
+    expect(par(TTL40).act(makeView(150, after), null)).toEqual([{ kind: 'up', chunkId: 0 }])
+  })
+})
+
+describe('ParBot Phase-B decay-correct futility', () => {
+  const mk = (age: number): SimView => {
+    const w = wave(0, ['A'], 100, 127)
+    return makeView(100, makeChunks([
+      { glyph: 'A', tier: 1, heat: 0.9, pips: 3, summaryAgeTicks: age },
+      { glyph: 'Z', tier: 2, protected: true, expandedLines: 5 },
+    ]), [w])
+  }
+
+  test('summary that survives the action tick is expanded (age TTL − 1)', () => {
+    expect(par(TTL40).act(mk(39), null)).toEqual([{ kind: 'up', chunkId: 0 }])
+  })
+
+  test('summary that decays before the action processes is futile inside a standard window (age TTL)', () => {
+    expect(par(TTL40).act(mk(40), null)).toEqual([])
   })
 })
 
@@ -204,6 +259,14 @@ describe('runner replay equality at finite TTL', () => {
     const cfg: SimConfig = { ...DEFAULTS, summaryTTL: 55 }
     const a = runRoundDetailed(cfg, 4011, new ReactiveBot())
     const b = runRoundDetailed(cfg, 4011, new ReactiveBot())
+    expect(a.finalHash).toBe(b.finalHash)
+    expect(a.result).toEqual(b.result)
+  })
+
+  test('ParBot on summaryTTL=55: identical finalHash and result across runs', () => {
+    const cfg: SimConfig = { ...DEFAULTS, summaryTTL: 55 }
+    const a = runRoundDetailed(cfg, 4011, new ParBot())
+    const b = runRoundDetailed(cfg, 4011, new ParBot())
     expect(a.finalHash).toBe(b.finalHash)
     expect(a.result).toEqual(b.result)
   })

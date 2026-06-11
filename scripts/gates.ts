@@ -2,10 +2,21 @@
  * §7 gates runner — `bun scripts/gates.ts [--rounds 100] [--seed 1000]
  * [--preset default] [--json out.json]`.
  *
- * Runs the five §7 bots over the SAME seed set, prints a per-bot table and a
- * PASS/FAIL verdict (with the measured number) for each of the six gates.
- * Exit code 0 only when all gates pass. Gates failing is expected until
- * tuning lands — this script's job is to MEASURE correctly, not to pass.
+ * Runs the six bots (recency, random-k, greedy-heat, reactive, par, oracle)
+ * over the SAME seed set, prints a per-bot table and a PASS/FAIL verdict
+ * (with the measured number) for each of the six gates. Exit code 0 only
+ * when all gates pass. Gates failing is expected until tuning lands — this
+ * script's job is to MEASURE correctly, not to pass.
+ *
+ * REACTIVE DOCTRINE (2026-06-11 — formulation amendment pending human
+ * review, see PLAYTEST.md): gate #2's adversary is the strongest HEAT-BLIND
+ * reactive (telegraphs + public non-predictive state only; never heat/pips).
+ * The previous fielded "reactive" (hedgeHeat 0.45) timed cold legs off the
+ * heat ramp pre-telegraph — that is prediction, and two information channels
+ * beating one is information theory, not a commitment-structure hole. That
+ * hybrid is promoted to ParBot — the mechanical par for human play (heat +
+ * telegraphs, no future knowledge), displayed in the table and used (with
+ * greedy-heat) as gate #4's human-like tension set. It is NOT a gate-2 bot.
  *
  * Gate operationalization (documented because §7 uses prose):
  *  1 recency-trap   recency ≤ 60% of oracle; oracle ≥ 1.15×greedy;
@@ -16,15 +27,18 @@
  *                   thresholds apply to mean pareto — formulation fix, see
  *                   PLAYTEST.md (survival ratios are mathematically
  *                   unsatisfiable at the ceiling).
- *  2 commitment     reactive ≤ 70% of oracle AND reactive < greedy, with
- *                   the same saturation fallback per comparison
- *                   (formulation fix, see PLAYTEST.md).
+ *  2 commitment     reactive (heat-blind, see doctrine above) ≤ 70% of
+ *                   oracle AND reactive < greedy, with the same saturation
+ *                   fallback per comparison (formulation fix, see
+ *                   PLAYTEST.md).
  *  3 decision-density   oracle mean accepted actions/sec ∈ [0.3, 1.0]
- *  4 near-miss      fraction of reactive+greedy resolved waves whose
+ *  4 near-miss      fraction of par+greedy resolved waves whose
  *                   lastHelpfulArrival falls in the final 25% of the
  *                   telegraph window ∈ [0.2, 0.4] — formulation fix, see
  *                   PLAYTEST.md: oracle's deliberate early-fetch safety
- *                   margin made it the wrong probe for human-like tension.
+ *                   margin made it the wrong probe; par+greedy is the
+ *                   human-like measurement set (2026-06-11 amendment: par
+ *                   replaces the old heat-timed reactive in this set).
  *  5 death-legibility   legible deaths / deaths ≥ 90% over greedy-heat +
  *                   reactive deaths (vacuously 1 when no deaths)
  *  6 session-shape  greedy-heat median round length ∈ [120, 240] seconds
@@ -199,9 +213,13 @@ export function evaluateGates(
     })
   }
 
-  // 2 — commitment (the v1.1 gate), same saturation fallback per comparison
-  // (formulation fix, see PLAYTEST.md); §7 thresholds (0.70, strict <)
-  // unchanged.
+  // 2 — commitment (the v1.1 gate), fielding the HEAT-BLIND ReactiveBot
+  // (2026-06-11 doctrine — formulation amendment pending human review, see
+  // PLAYTEST.md: heat-timed hedging is prediction and belongs to ParBot;
+  // the gate certifies against the strongest reactive that reads telegraphs
+  // + public non-predictive state only). Same saturation fallback per
+  // comparison (formulation fix, see PLAYTEST.md); §7 thresholds (0.70,
+  // strict <) unchanged.
   {
     const ra = pairMetric(reactive, oracle) // reactive ≤ 0.70 × oracle
     const rb = pairMetric(reactive, greedy) // reactive < greedy
@@ -238,10 +256,12 @@ export function evaluateGates(
     })
   }
 
-  // 4 — near-miss tension, measured on reactive+greedy resolved waves
+  // 4 — near-miss tension, measured on par+greedy resolved waves
   // (formulation fix, see PLAYTEST.md: the oracle deliberately lands fetches
   // ~12 ticks early as safety margin, so it never registers tension — the
-  // human-like bots are the right probe). Band [0.2, 0.4] unchanged.
+  // human-like bots are the right probe; 2026-06-11 amendment pending human
+  // review: ParBot replaces the old heat-timed reactive in this set). Band
+  // [0.2, 0.4] unchanged.
   {
     const pass = nearMiss.frac >= 0.2 && nearMiss.frac <= 0.4
     gates.push({
@@ -249,7 +269,7 @@ export function evaluateGates(
       name: 'near-miss',
       pass,
       measured: { lateFrac: nearMiss.frac, late: nearMiss.late, resolved: nearMiss.resolved },
-      detail: `late-window arrivals (reactive+greedy) ${nearMiss.late}/${nearMiss.resolved}=${f(nearMiss.frac)} (need 0.20..0.40)`,
+      detail: `late-window arrivals (par+greedy) ${nearMiss.late}/${nearMiss.resolved}=${f(nearMiss.frac)} (need 0.20..0.40)`,
     })
   }
 
@@ -320,11 +340,13 @@ function main(): number {
 
   const roster = makeRoster()
   const byBot: Record<string, RoundResult[]> = {}
-  // Wave windows for gate #4 come from reactive + greedy-heat (formulation
-  // fix, see PLAYTEST.md — the oracle's safety margin hides the tension).
+  // Wave windows for gate #4 come from par + greedy-heat — the human-like
+  // set (formulation fix + 2026-06-11 amendment, see PLAYTEST.md — the
+  // oracle's safety margin hides the tension; the heat-blind reactive is a
+  // gate-2 adversary, not a human model).
   const tensionDetails: RoundDetail[] = []
   for (const bot of roster) {
-    const track = bot.name === 'reactive' || bot.name === 'greedy-heat'
+    const track = bot.name === 'par' || bot.name === 'greedy-heat'
     const results: RoundResult[] = []
     for (const seed of seeds) {
       const det = runRoundDetailed(config, seed, bot, { trackWaves: track })

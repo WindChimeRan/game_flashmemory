@@ -243,3 +243,122 @@ _(leave notes here — anything: feel, confusion, fun, frustration)_
   upHeat grids): every pareto-improving retune drops its survival below
   the 0.95 saturation bound and breaks gate 1 — kept at evictAt 0.7 /
   upHeat 0.55, documented here instead of changed.
+
+- 2026-06-11: **reactive doctrine split — the gate-2 adversary is now
+  HEAT-BLIND; the heat+telegraph hybrid is promoted to ParBot.**
+  (Formulation amendment pending human review, same review track as the
+  gate formulation fixes above.)
+
+  **Doctrine + rationale.** Gate #2 exists to falsify "telegraphs alone
+  suffice" (§4.3's whack-a-mole hole). The strongest reactive from the TTL
+  experiment (hedgeHeat 0.45) timed cold legs off the heat ramp ~56 ticks
+  before a landing — pre-telegraph. That is prediction, not reaction, and
+  no parking price can touch it because it parks nothing. Two information
+  channels (heat + telegraph) beating one (greedy's heat-only) is
+  information theory, not a commitment-structure flaw — so that bot is not
+  evidence about gate #2's question. Therefore: a reactive-family bot may
+  read telegraphs and public non-predictive state (tiers, transfers,
+  viewport pressure, bus, chunk ages, decay counters, rules constants via
+  configure()) and NEVER chunk.heat / chunk.pips; blind hedging (summary
+  walls built from no predictive signal) is allowed. Enforced mechanically,
+  not by review: test/bots/heatblind.test.ts wraps every ChunkView in a
+  Proxy that throws on heat/pips access and runs ReactiveBot full rounds
+  against it (all wall policies + a finite-TTL round; proxied rounds are
+  hash-identical to plain rounds; GreedyHeat/Par trip the probe on tick 1,
+  so it is not vacuous). The hybrid lives on as **ParBot ('par')** — the
+  mechanical par for human play (heat + telegraphs, no future knowledge),
+  shown in the table between greedy-heat and oracle, and it replaces the
+  old reactive in gate #4's near-miss measurement set (par + greedy = the
+  human-like set). It is NOT a gate-2 adversary. Roster and gates table now
+  field six bots; the port preserved its strength exactly (pareto 0.441 /
+  0.447 on the 4000/2000 blocks vs 0.438–0.441 documented above).
+
+  **A/B — blind-hedge variants, 50 seeds @4000 (replicated @2000, second
+  number where it differs):**
+
+  | variant | surv | credit | resid | pareto | waves/round | deaths |
+  |---|---|---|---|---|---|---|
+  | none (pure telegraph) | 0.58/0.56 | 0.16 | 0.37 | 0.060/0.056 | 6.1 | 50/50 collapse |
+  | uniform wall (1 summary/glyph) | 1.00 | 0.73/0.80 | 0.63 | 0.270/0.298 | 1.9 | 0 |
+  | recency wall K=6 | 0.77/0.78 | 0.23 | 0.52 | 0.087/0.086 | 6.5 | 50/50 collapse |
+  | recency wall K=8 | 0.91/0.90 | 0.29 | 0.59 | 0.108/0.107 | 6.2 | 36/38 collapse |
+  | **eligible wall (fielded)** | 1.00 | 0.77/0.78 | 0.60 | **0.308/0.317** | 2.0 | 0 |
+  | eligible, lead 20 | 1.00 | 0.77/0.78 | 0.60 | 0.308/0.317 | 1.9 | 0 |
+  | greedy-heat (ref) | 0.97/0.95 | 0.53/0.55 | 0.61 | 0.204/0.207 | 9.3 | 20/25 |
+  | par (ref) | 1.00 | 0.86/0.87 | 0.49 | 0.441/0.447 | 11.5 | 0 |
+  | oracle (ref) | 1.00 | 1.00 | 0.45 | 0.550 | 13.4 | 0 |
+
+  'eligible' = keep one live summary per glyph unless the glyph already has
+  a non-summary blocker (expanded / in-flight chunk) or its youngest chunk
+  is < stdMinAge − 50 (ineligible by age anyway); maintained almost
+  entirely by FREE tier-downs as chunks leave the protected strip, with
+  cold up-legs only as repair. Fielded as the ReactiveBot default.
+
+  **Finding 1 — the commitment structure did its job.** Pure-telegraph
+  reaction (wall 'none') dies on every seed (pareto 0.06): reaction had to
+  become prediction to compete. The old reactive's strength came entirely
+  from the heat channel, i.e. from predicting — exactly what gate #2 was
+  built to force. Partial walls (recency K) die too: coverage gaps leak
+  waves that land on chips.
+
+  **Finding 2 — the strongest blind reactive wins by WAVE SUPPRESSION, a
+  real mechanic problem (gate 2(b) still fails; not massaged).** The
+  full walls don't predict anything — they exploit two rules interacting:
+  (a) standard-wave eligibility (director.tryStandard) requires EVERY chunk
+  of a glyph to be chip-tier, idle, and aged ≥ stdMinAge, so one standing
+  summary per glyph vetoes the entire std wave stream (the director defers
+  forever: ~1.9 resolved waves/round vs greedy's 9.3 — what's left is the
+  boss, which accepts any tier and is cleared reactively from the wall
+  since L_warm 14 < telegraphBoss 120); and (b) meanCredit's denominator
+  is RESOLVED waves only (sim.result), so suppressed waves vanish from the
+  recall term instead of counting against it — survival saturates, credit
+  reads 0.77–0.80 off ~2 waves, pareto 0.31–0.33 > greedy's 0.21. This is
+  a different hole than the 2026-06-10 escalation (that was heat-timed
+  JIT; this is game-denial). Candidate mechanics for the next iteration,
+  deliberately NOT implemented here: make std eligibility non-vetoable by
+  player tier state (e.g. age-only eligibility with the telegraph window
+  extended when the glyph is warm), and/or charge scheduled-but-suppressed
+  wave slots into the credit denominator so denying the game stops being
+  free. §7's L_warm corrective does not touch it (the wall pays L_c2s once
+  and L_warm only at telegraphs).
+
+  Full run `bun scripts/gates.ts --rounds 100 --seed 1000` (shipped
+  defaults; reactive = heat-blind eligible wall, par = promoted hybrid):
+
+  ```
+  bot              surv%   credit    resid   pareto      aps       legible%
+  recency           56.9     0.15     0.37     0.06     0.24    89 (89/100)
+  random-k          58.3     0.16     0.46     0.05     0.27    92 (92/100)
+  greedy-heat       95.6     0.55     0.60     0.21     0.68     98 (42/43)
+  reactive         100.0     0.82     0.59     0.33     0.30        — (0/0)
+  par              100.0     0.87     0.49     0.45     0.72        — (0/0)
+  oracle           100.0     1.00     0.45     0.55     0.61        — (0/0)
+
+  Gate 1 recency-trap      PASS — recency/oracle=0.57 [surv] (need ≤0.60 ok); oracle≫greedy 0.55 vs 0.21 [pareto] (≥1.15× ok); greedy≫recency 0.96 vs 0.57 [surv] (≥1.15× ok); |recency−random|=0.01 [surv] (≤0.10 ok)
+  Gate 2 commitment        FAIL — reactive/oracle=0.61 [pareto] (need ≤0.70 ok); reactive<greedy 0.33 vs 0.21 [pareto] (FAIL)
+  Gate 3 decision-density  PASS — oracle aps=0.61 (need 0.30..1.00)
+  Gate 4 near-miss         PASS — late-window arrivals (par+greedy) 831/2114=0.39 (need 0.20..0.40)
+  Gate 5 death-legibility  PASS — legible 42/43=0.98 (need ≥0.90)
+  Gate 6 session-shape     PASS — greedy median 1800 ticks = 180s (need 120..240s)
+
+  ALL GATES: FAIL (5/6)
+  ```
+
+  Gate 2(a) now PASSES against the true blind adversary (0.61, and 0.58 on
+  the probe block — the previous 0.82 read was the par-class hybrid, which
+  was never the right bot for this gate). Gate 2(b) is the suppression
+  finding above.
+
+  Robustness probe (50 rounds @2000): 4/6 — gate 2(b) fails there on the
+  mixed-saturation survival path (reactive 1.00 vs greedy 0.948), same
+  conclusion; gate 1 sits in its known pre-existing dead band (greedy surv
+  0.948 < 0.95, flagged 2026-06-10 — not a doctrine effect); gates 3–6
+  hold (aps 0.61, near-miss 0.396 — still riding the 0.40 ceiling exactly
+  as before since par's behavior ≡ the old reactive's, legible 0.96,
+  median 180 s). Residual watch items: (1) gate 5's death pool is now
+  greedy-only (the blind reactive is deathless) — if a future blind
+  variant dies, note that heat-warning attribution judges a heat-blind
+  player against a channel the doctrine says reactive bots don't read;
+  worth a look in the same human review. (2) gate 4's measurement set
+  change (par for old-reactive) is numerically a no-op by construction,
+  but the set is now doctrine-defined rather than incidental.

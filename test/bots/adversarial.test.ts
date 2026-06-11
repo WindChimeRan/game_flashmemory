@@ -4,10 +4,14 @@
  *  - OracleBot: degraded-only jobs must still release (banked partial credit);
  *    under bus contention the tightest-slack job starts first, not the
  *    earliest-landing one; maxResidency cap evicts instead of expanding.
- *  - ReactiveBot: bus-full means retry-not-stall; a headroom-blocked react
- *    evicts a NON-telegraphed chunk; hedging respects the cap, prefers
- *    corroborated (3-pip) glyphs over hotter 1-pip distractors, and the
- *    eviction threshold keeps pressure below the hedge cap (no dead zone).
+ *  - ReactiveBot (heat-blind, 2026-06-11 doctrine): bus-full means
+ *    retry-not-stall; a headroom-blocked react evicts a NON-telegraphed
+ *    chunk; the blind wall is heat/pip-INSENSITIVE (same action under
+ *    swapped heat); idle expandeds are housekept down; sufficiency-capped
+ *    boss reaction never over-fetches.
+ *  - ParBot (the promoted heat+telegraph hybrid): hedging prefers
+ *    corroborated (3-pip) glyphs over hotter 1-pip distractors — the
+ *    heat-channel behavior that moved here from the old reactive.
  *  - All roster bots: only legal actions against hostile views (everything
  *    protected / pinned / transferring), even at zero headroom.
  *  - Runner: trackWaves must not leak OracleView fields to non-oracle bots.
@@ -25,7 +29,7 @@ import {
   type TransferState,
   type WaveView,
 } from '../../src/sim'
-import { OracleBot, ReactiveBot, makeRoster, runRoundDetailed } from '../../src/bots'
+import { OracleBot, ParBot, ReactiveBot, makeRoster, runRoundDetailed } from '../../src/bots'
 
 // ── fixture builders ─────────────────────────────────────────────────────
 
@@ -128,8 +132,15 @@ function freshOracle(opts?: ConstructorParameters<typeof OracleBot>[0]): OracleB
   return bot
 }
 
-function freshReactive(): ReactiveBot {
-  const bot = new ReactiveBot()
+function freshReactive(opts?: ConstructorParameters<typeof ReactiveBot>[0]): ReactiveBot {
+  const bot = new ReactiveBot(opts)
+  bot.configure(DEFAULTS)
+  bot.reset(1)
+  return bot
+}
+
+function freshPar(): ParBot {
+  const bot = new ParBot()
   bot.configure(DEFAULTS)
   bot.reset(1)
   return bot
@@ -182,7 +193,7 @@ describe('OracleBot adversarial probes', () => {
   })
 })
 
-// ── ReactiveBot probes ───────────────────────────────────────────────────
+// ── ReactiveBot probes (heat-blind) ──────────────────────────────────────
 
 describe('ReactiveBot adversarial probes', () => {
   test('bus-full: no action this tick, retries the telegraphed expand once a slot frees', () => {
@@ -214,11 +225,77 @@ describe('ReactiveBot adversarial probes', () => {
       { glyph: 'A', tier: 0, heat: 0.9, pips: 3 }, // demanded glyph: untouchable
       { glyph: 'Z', tier: 2, protected: true, expandedLines: 24 },
     ])
-    const view = makeView(100, chunks, [wave]) // used 31/34: headroom 3, upFits fails
+    const view = makeView(100, chunks, [wave]) // used 31/26: panic + blocked paths agree
     const actions = freshReactive().act(view, null)
     expect(actions).toEqual([{ kind: 'down', chunkId: 1 }])
   })
 
+  test('blind wall is heat/pip-insensitive: same repair leg under swapped heat', () => {
+    // Two cold glyphs, one already-walled glyph: the wall repairs A first
+    // (deterministic glyph order), regardless of which chunk looks "hot" —
+    // the heat channel belongs to greedy/par, not the gate-2 adversary.
+    const mk = (heatA: number, pipsA: number, heatB: number, pipsB: number): SimView =>
+      makeView(100, makeChunks([
+        { glyph: 'A', tier: 0, heat: heatA, pips: pipsA },
+        { glyph: 'B', tier: 0, heat: heatB, pips: pipsB },
+        { glyph: 'D', tier: 1, heat: 0.05, pips: 1 },
+        { glyph: 'Z', tier: 2, protected: true, expandedLines: 10 },
+      ]))
+    expect(freshReactive().act(mk(0.5, 3, 0.9, 1), null)).toEqual([{ kind: 'up', chunkId: 0 }])
+    expect(freshReactive().act(mk(0.9, 1, 0.5, 3), null)).toEqual([{ kind: 'up', chunkId: 0 }])
+  })
+
+  test('housekeeping: an idle expanded chunk is downed even at low pressure', () => {
+    // Post-wave teardown / wall building: the down lands at summary, which
+    // both sheds lines and keeps the glyph warm (and std-wave-ineligible).
+    const chunks = makeChunks([
+      { glyph: 'C', tier: 2, heat: 0.9, pips: 3, expandedLines: 6 },
+      { glyph: 'Z', tier: 2, protected: true, expandedLines: 5 },
+    ])
+    expect(freshReactive().act(makeView(100, chunks), null)).toEqual([{ kind: 'down', chunkId: 0 }])
+  })
+
+  test('wall dedup: chips the spare summary, keeps the cheapest-to-expand one', () => {
+    const chunks = makeChunks([
+      { glyph: 'A', tier: 1, expandedLines: 5 }, // dup — chipped
+      { glyph: 'A', tier: 1, expandedLines: 4 }, // keep (cheaper later expand)
+      { glyph: 'Z', tier: 2, protected: true, expandedLines: 5 },
+    ])
+    expect(freshReactive().act(makeView(100, chunks), null)).toEqual([{ kind: 'down', chunkId: 0 }])
+  })
+
+  test("wall 'none' (pure-telegraph control): summaries are housekept to chip", () => {
+    const chunks = makeChunks([
+      { glyph: 'A', tier: 0 },
+      { glyph: 'D', tier: 1 },
+      { glyph: 'Z', tier: 2, protected: true, expandedLines: 5 },
+    ])
+    expect(freshReactive({ wall: 'none' }).act(makeView(100, chunks), null)).toEqual([
+      { kind: 'down', chunkId: 1 },
+    ])
+  })
+
+  test('sufficiency cap: boss already at the credit override ⇒ no further fetches', () => {
+    // |G|=5, sufficiency 0.6 ⇒ need 3 expanded; A,B,C already serve. The
+    // old reactive expanded all five (wasted lines + bus); the blind bot
+    // stops at the override and leaves D,E at summary (telegraphed, so
+    // housekeeping spares them too).
+    const wave = mkWave(0, ['A', 'B', 'C', 'D', 'E'], 80, 190, 0.6, 'boss')
+    const chunks = makeChunks([
+      { glyph: 'A', tier: 2, expandedLines: 5 },
+      { glyph: 'B', tier: 2, expandedLines: 5 },
+      { glyph: 'C', tier: 2, expandedLines: 5 },
+      { glyph: 'D', tier: 1 },
+      { glyph: 'E', tier: 1 },
+      { glyph: 'Z', tier: 2, protected: true, expandedLines: 5 },
+    ])
+    expect(freshReactive().act(makeView(100, chunks, [wave]), null)).toEqual([])
+  })
+})
+
+// ── ParBot probes (the promoted heat+telegraph hybrid) ───────────────────
+
+describe('ParBot adversarial probes', () => {
   test('hedge: prefers the 3-pip glyph over a hotter 1-pip (likely distractor)', () => {
     const chunks = makeChunks([
       { glyph: 'A', tier: 0, heat: 0.5, pips: 3 },
@@ -226,21 +303,20 @@ describe('ReactiveBot adversarial probes', () => {
       { glyph: 'D', tier: 1, heat: 0.05, pips: 1 },
       { glyph: 'Z', tier: 2, protected: true, expandedLines: 10 },
     ])
-    const actions = freshReactive().act(makeView(100, chunks), null)
+    const actions = freshPar().act(makeView(100, chunks), null)
     expect(actions).toEqual([{ kind: 'up', chunkId: 0 }])
   })
 
   test('no dead zone: above the hedge cap the bot sheds lines instead of idling', () => {
-    // Pressure 22/34 ≈ 0.65 — hedging is capped out; with evictAt < hedgeCap
-    // the bot must evict the cold summary so hedging can resume. (The old
-    // evictAt 0.75 default idled here: no hedge, no evict, 16/100 collapses.)
+    // Pressure 22/26 ≈ 0.85 — hedging is capped out; with evictAt < hedgeCap
+    // the bot must evict the cold summary so hedging can resume.
     const chunks = makeChunks([
       { glyph: 'A', tier: 0, heat: 0.5, pips: 3 },
       { glyph: 'B', tier: 0, heat: 0.9, pips: 1 },
       { glyph: 'D', tier: 1, heat: 0.05, pips: 1 },
       { glyph: 'Z', tier: 2, protected: true, expandedLines: 21 },
     ])
-    const actions = freshReactive().act(makeView(100, chunks), null)
+    const actions = freshPar().act(makeView(100, chunks), null)
     expect(actions).toEqual([{ kind: 'down', chunkId: 2 }])
   })
 })

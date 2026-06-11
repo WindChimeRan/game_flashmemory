@@ -40,7 +40,7 @@ export function usage(): string {
     'usage:',
     '  oom play  [--preset chill|default|inferno] [--seed N] [--warp N]',
     '            [--llm] [--llm-url URL] [--llm-model M]',
-    '  oom sim   --bot recency|random-k|greedy-heat|reactive|oracle',
+    '  oom sim   --bot recency|random-k|greedy-heat|reactive|par|oracle',
     '            --rounds N [--seed N] [--preset P] [--json]',
     '  oom demo  [file.md]               (default assets/demo.md)',
     '  oom gates [args…]                 (passthrough to scripts/gates.ts)',
