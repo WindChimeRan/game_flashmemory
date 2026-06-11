@@ -13,22 +13,46 @@ and expanded, the story flows; if you evicted them, the narrator
 *hallucinates* — the text visibly corrupts and your coherence drops. Run out
 of viewport: **OOM, game over.**
 
-The catch (§4.3 of the design): fetching from cold is *slow* — slower than
-the telegraph that warns you. **You cannot react your way out; you must
-predict.** Evict ruthlessly, prefetch on faith, and keep residency low: the
-score is `survival × recall × (1 − avg residency)` — the same Pareto the
+The catch: fetching from cold is *slow* — slower than the telegraph that
+warns you. **You cannot react your way out; you must predict.** Evict
+ruthlessly, prefetch on faith, and keep residency low: the score is
+`survival × recall × (1 − avg residency)` — the same Pareto the
 serving-systems research it's based on optimizes.
+
+## The game in 60 seconds
+
+Every paragraph is about a **character** (its letter badge) and lives in
+one of three states: **expanded** (full prose, costs lines), **summary**
+(one dim line), or **chip** (a tile on the cold shelf, costs nothing).
+`f` raises a chunk one state; `d` drops it one, instantly.
+
+- The story streams in and takes space. When it no longer fits: **OOM,
+  game over**. Evicting is your resting activity, not your emergency one.
+- **Callbacks** land periodically, asking for characters by letter:
+  expanded answers fully, summary partially, chip barely, absent = miss.
+  Misses corrupt the text and drain coherence; empty coherence = game over.
+- **Fetching is slow, forgetting is instant** — and a cold recall (~5.5s)
+  takes *longer than the warning* (~3s). A chip announced in the INCOMING
+  panel is a chip already lost.
+- So play the **heat**: badges glow ~9 seconds before their moment. Glow
+  with `●●●` pips = fetch now, on faith. One-pip glow = bait; that
+  character is never coming. The telegraph is your receipt, not your alarm.
+- Two transfer slots, no cancels, and the boss demands several characters
+  *expanded* at once — start its queue the moment it's telegraphed.
+
+Keys: `j/k` focus · letters jump to a character · `f` fetch · `d` evict ·
+`p` pin · `space` pause · `q q` quit. Full manual with screen anatomy,
+strategy, and the bot ladder: **[GUIDE.md](GUIDE.md)**.
 
 ## Quickstart
 
 ```bash
 git clone <this-repo> && cd game_flashmemory
-bun src/cli.ts play            # arcade mode, scripted story (zero deps)
+bun src/cli.ts play --preset chill     # first game (zero deps; needs bun + a 100×30 terminal)
 ```
 
-`bun src/cli.ts play --preset chill|default|inferno --seed N` · pause with
-`space` · `j/k` focus · `f` prefetch · `d` evict · `p` pin · letters jump to
-glyphs. Difficulty is measured in tokens per second.
+`--preset chill|default|inferno` sets speed — difficulty is measured in
+tokens per second. `--seed N` replays an identical round.
 
 ## Live-LLM mode (vllm-metal)
 
