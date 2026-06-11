@@ -60,17 +60,17 @@ describe('splitPieces · pure CJK', () => {
 
   test('even-length run + punct re-splits 1+1 (走了。 → 走|了。)', () => {
     expect(splitPieces('走了。', true).pieces).toEqual(['走', '了。'])
-    expect(splitPieces('他走了。', true).pieces).toEqual(['他走', '了。'])
+    expect(splitPieces('他走了。', true).pieces).toEqual(['他', '走', '了。'])
     expect(splitPieces('剑。', true).pieces).toEqual(['剑。'])
   })
 
-  test('piece count ≈ ceil(graphemes/2): the targetTokens arithmetic input', () => {
+  test('piece count = graphemes (singles): the targetTokens arithmetic input', () => {
     const run = '星'.repeat(7) + '盘'.repeat(6) // 13 wide graphemes, no punct
     const { pieces } = splitPieces(run, true)
-    expect(pieces.length).toBe(Math.ceil(13 / 2))
+    expect(pieces.length).toBe(13)
     expect(pieces.join('')).toBe(run)
-    // a 40–80-字 paragraph yields ≥ 20 pieces — enough for typical targets
-    expect(splitPieces('档'.repeat(40), true).pieces.length).toBe(20)
+    // singles: a 60–90-字 paragraph yields 60–90 pieces — covers 44–77 targets
+    expect(splitPieces('档'.repeat(40), true).pieces.length).toBe(40)
   })
 })
 
@@ -85,20 +85,20 @@ describe('splitPieces · Latin and mixed', () => {
   test('mixed CJK/Latin: words stay whole, CJK splits, the join is lossless', () => {
     const text = 'Qwen3 引擎在 archive 区轰鸣。'
     const { pieces } = splitPieces(text, true)
-    expect(pieces).toEqual(['Qwen3 ', '引擎', '在 ', 'archive ', '区轰', '鸣。'])
+    expect(pieces).toEqual(['Qwen3 ', '引', '擎', '在 ', 'archive ', '区', '轰', '鸣。'])
     expect(pieces.join('')).toBe(text)
   })
 
   test('script boundary without a space stays lossless (no synthesized gaps)', () => {
     const text = '代号OOM启动。'
     const { pieces } = splitPieces(text, true)
-    expect(pieces).toEqual(['代号', 'OOM', '启', '动。'])
+    expect(pieces).toEqual(['代', '号', 'OOM', '启', '动。'])
     expect(pieces.join('')).toBe(text)
   })
 
   test('Latin punctuation rides inside the word; CJK punct seals a word', () => {
     expect(splitPieces("can't stop", true).pieces).toEqual(["can't ", 'stop '])
-    expect(splitPieces('好的yes，再来', true).pieces).toEqual(['好的', 'yes，', '再来'])
+    expect(splitPieces('好的yes，再来', true).pieces).toEqual(['好', '的', 'yes，', '再', '来'])
   })
 })
 
@@ -108,10 +108,10 @@ describe('splitPieces · streaming (final=false)', () => {
     expect(splitPieces('alp', false)).toEqual({ pieces: [], rest: 'alp' })
     // a space seals the word — settled immediately (old splitter cadence)
     expect(splitPieces('alpha ', false)).toEqual({ pieces: ['alpha '], rest: '' })
-    // a wide pair is held open (its follower decides punct re-splitting)
-    expect(splitPieces('夜风', false)).toEqual({ pieces: [], rest: '夜风' })
+    // the newest wide grapheme is held open (its follower decides punct cling)
+    expect(splitPieces('夜风', false)).toEqual({ pieces: ['夜'], rest: '风' })
     // closed pair settles once the next run starts; the open run is the tail
-    expect(splitPieces('夜风掠过秘', false)).toEqual({ pieces: ['夜风', '掠过'], rest: '秘' })
+    expect(splitPieces('夜风掠过秘', false)).toEqual({ pieces: ['夜', '风', '掠', '过'], rest: '秘' })
     // a punct-sealed piece at the very end is withheld (more punct may chain)
     expect(splitPieces('走了。', false)).toEqual({ pieces: ['走'], rest: '了。' })
   })

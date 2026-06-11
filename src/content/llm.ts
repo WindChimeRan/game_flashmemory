@@ -214,7 +214,7 @@ export function splitPieces(text: string, final: boolean): PieceSplit {
     if (cellWidth(g) === 2) {
       if (latin && run.length > 0) close() // word→CJK boundary (no space in source)
       latin = false
-      if (run.length === 2) close() // wide pair held until its follower decides
+      if (run.length >= 1) close() // singles: doubles zh piece yield so 0.6B-length prose covers targets
       run.push(g)
       continue
     }
@@ -459,7 +459,7 @@ export class LlmProvider implements ContentProvider {
       model: this.model,
       messages: buildMessages(job.spec, this.lang),
       temperature: this.temperature,
-      max_tokens: this.maxTokens,
+      max_tokens: this.lang === 'zh' ? Math.max(this.maxTokens, 360) : this.maxTokens,
       stream: true,
       seed: job.spec.seed >>> 0,
       stop: ['\n\n'],
@@ -710,13 +710,13 @@ export function buildMessages(spec: ChunkSpec, lang: LlmLang = 'en'): { role: st
         role: 'system',
         content:
           '你是连载小说《OOM》的叙述者——一部永不完结的科幻武侠通俗连载。文风浓烈、紧凑、具体可感;短句铿锵;每段结尾都悬着钩子。' +
-          '只回复一段40到80字的中文正文。不要标题、不要列表、不要引号包裹、不要表情符号、不要任何解说。',
+          '只回复一段110到160字的中文正文。不要标题、不要列表、不要引号包裹、不要表情符号、不要任何解说。',
       },
       {
         role: 'user',
         content:
           `续写连载的下一段。本段主角:${who.name},${who.title},随身带着${who.prop}。场景:${theme}。` +
-          '只写一段中文,40到80字,生动浓烈,以悬念收尾。',
+          '只写一段中文,110到160字,生动浓烈,以悬念收尾。',
       },
     ]
   }

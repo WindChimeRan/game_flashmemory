@@ -69,6 +69,24 @@ Any OpenAI-compatible endpoint works (`OOM_LLM_BASE_URL`, `OOM_LLM_MODEL`,
 `OOM_LLM_API_KEY`). The LLM is texture, never truth: a deterministic
 director owns all game state, the model only writes the prose, and the game
 falls back to the scripted narrator mid-chunk if generation ever stalls.
+The install path above is verified end-to-end from a clean machine profile
+(installer → dev wheel → server → completions).
+
+Two full rounds, played by the built-in `par` bot (`--pilot par`, honestly
+labeled on screen), story written live by Qwen3-0.6B — same seed, so the
+*game* is identical and only the story's language changes:
+
+**English** (`play --llm --pilot par --seed 7`):
+
+![live LLM round, English](assets/play-llm-en.gif)
+
+**Chinese** (`play --llm --llm-lang zh --pilot par --seed 7`) — the layout
+engine wraps width-2 CJK mid-paragraph, and the cast gets Chinese names
+(顾长风, 沈雁回, …). When the 0.6B model under-delivers on length, you'll
+see brief English tails — that's the scripted safety net padding the chunk
+mid-stream, by design:
+
+![live LLM round, Chinese](assets/play-llm-zh.gif)
 
 ## The research it plays
 

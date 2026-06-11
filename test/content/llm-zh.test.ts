@@ -83,7 +83,7 @@ describe('LlmProvider · zh mode', () => {
       const messages = srv.posts[0]!.messages as { role: string; content: string }[]
       expect(messages[0]!.role).toBe('system')
       expect(messages[0]!.content).toContain('中文') // asks for Chinese prose
-      expect(messages[0]!.content).toContain('40到80字') // 40–80 token paragraph
+      expect(messages[0]!.content).toContain('110到160字') // long enough to cover 44–77 piece targets
       expect(messages[1]!.role).toBe('user')
       expect(messages[1]!.content).toContain(characterZhFor('A').name) // 顾长风
       expect(messages[1]!.content).toContain('秘档库') // zh theme flavor
@@ -93,16 +93,16 @@ describe('LlmProvider · zh mode', () => {
     }
   })
 
-  test('CJK prose streams as 1–2-grapheme pieces; count feeds targetTokens', async () => {
+  test('CJK prose streams as single-grapheme (+punct) pieces; count feeds targetTokens', async () => {
     const srv = startServer(() => textResponse(ZH_DELTAS))
     try {
       const provider = new LlmProvider({ baseUrl: srv.url, lang: 'zh' })
-      const pieces = await drain(provider.nextChunk(spec({ targetTokens: 8 })))
-      expect(pieces).toEqual(['夜风', '掠过', '秘档', '库，', '顾长', '风按', '住星', '盘。'])
+      const pieces = await drain(provider.nextChunk(spec({ targetTokens: 14 })))
+      expect(pieces).toEqual(['夜', '风', '掠', '过', '秘', '档', '库，', '顾', '长', '风', '按', '住', '星', '盘。'])
       for (const p of pieces) expect(graphemes(p).length).toBeLessThanOrEqual(2)
       expect(pieces.join('')).toBe(ZH_TEXT) // lossless, no synthetic spaces
       const st = provider.stats()
-      expect(st.live).toBe(1) // 8 pieces ≥ targetTokens 8 — fully live
+      expect(st.live).toBe(1) // 14 pieces ≥ targetTokens 14 — fully live
       expect(st.padded).toBe(0)
     } finally {
       srv.stop()
@@ -113,11 +113,11 @@ describe('LlmProvider · zh mode', () => {
     const srv = startServer(() => textResponse(ZH_DELTAS))
     try {
       const provider = new LlmProvider({ baseUrl: srv.url, lang: 'zh' })
-      const s = spec({ targetTokens: 14 })
+      const s = spec({ targetTokens: 20 })
       const pieces = await drain(provider.nextChunk(s))
-      expect(pieces.length).toBe(14) // 8 live CJK + 6 padded
-      expect(pieces.slice(0, 8).join('')).toBe(ZH_TEXT)
-      expect(pieces.slice(8)).toEqual([...scriptedPieces(s)].slice(0, 6)) // English scripted
+      expect(pieces.length).toBe(20) // 14 live CJK + 6 padded
+      expect(pieces.slice(0, 14).join('')).toBe(ZH_TEXT)
+      expect(pieces.slice(14)).toEqual([...scriptedPieces(s)].slice(0, 6)) // English scripted
       expect(provider.stats().padded).toBe(1)
     } finally {
       srv.stop()
