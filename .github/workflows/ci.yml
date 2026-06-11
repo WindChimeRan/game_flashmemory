@@ -1,0 +1,27 @@
+name: ci
+on:
+  push: { branches: [main] }
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with: { bun-version: latest }
+      - run: bun install
+      - run: bunx tsc --noEmit
+      - run: bun test
+
+  gates:
+    # Measured-fun gates (OOM_DESIGN.md §7). Non-blocking until 6/6 holds
+    # across tuning iterations; the test job above is the merge gate.
+    runs-on: macos-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with: { bun-version: latest }
+      - run: bun install
+      - run: bun scripts/gates.ts --rounds 30 --seed 1000
