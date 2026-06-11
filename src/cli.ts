@@ -1,7 +1,8 @@
 /**
  * oom — CLI entry. Subcommands:
  *
- *   oom play  [--preset chill|default|inferno] [--seed N]
+ *   oom play  [--preset chill|default|inferno] [--seed N] [--warp N]
+ *             [--pilot BOT] [--llm] [--llm-url U] [--llm-model M] [--llm-lang en|zh]
  *   oom sim   --bot <name> --rounds N [--seed N] [--preset P] [--json]
  *   oom demo  [file]            (default assets/demo.md)
  *   oom gates [args…]           (passthrough to scripts/gates.ts)
@@ -16,18 +17,20 @@ import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { preset, type PresetName } from './sim'
 import { makeBot, runMany } from './bots'
-import { runGame } from './game/app'
+import { runGame, type PilotSpec } from './game/app'
 import { runDemo } from './game/demo'
 import { LlmProvider } from './content/llm'
 
-/** Present only when LLM mode was requested (--llm / --llm-url / --llm-model). */
+/** Present only when LLM mode was requested (--llm / --llm-url / --llm-model / --llm-lang). */
 export interface LlmCliOptions {
   url: string | null
   model: string | null
+  /** Story language (--llm-lang); null → provider default (env OOM_LLM_LANG, then en). */
+  lang: 'en' | 'zh' | null
 }
 
 export type Parsed =
-  | { cmd: 'play'; preset: PresetName; seed: number | null; warp: number; llm?: LlmCliOptions }
+  | { cmd: 'play'; preset: PresetName; seed: number | null; warp: number; llm?: LlmCliOptions; pilot?: string }
   | { cmd: 'sim'; bot: string; rounds: number; seed: number; preset: PresetName; json: boolean }
   | { cmd: 'demo'; file: string }
   | { cmd: 'gates'; rest: string[] }
@@ -39,17 +42,24 @@ export function usage(): string {
     '',
     'usage:',
     '  oom play  [--preset chill|default|inferno] [--seed N] [--warp N]',
-    '            [--llm] [--llm-url URL] [--llm-model M]',
+    '            [--pilot BOT] [--llm] [--llm-url URL] [--llm-model M]',
+    '            [--llm-lang en|zh]',
     '  oom sim   --bot recency|random-k|greedy-heat|reactive|par|oracle',
     '            --rounds N [--seed N] [--preset P] [--json]',
     '  oom demo  [file.md]               (default assets/demo.md)',
     '  oom gates [args…]                 (passthrough to scripts/gates.ts)',
     '',
+    'pilot mode (play --pilot par): a roster bot plays the round (same names',
+    'as sim --bot); the keyboard keeps ␣ pause and q-q quit, and the bottom',
+    'bar shows a PILOT tag so recordings are honestly labeled.',
+    '',
     'llm mode (play --llm): prose streams from an OpenAI-compatible endpoint,',
     'sanitized, with seamless scripted fallback — the game never blocks on it.',
-    '--llm-url/--llm-model imply --llm and override the env defaults:',
+    '--llm-url/--llm-model/--llm-lang imply --llm and override the env defaults:',
     '  OOM_LLM_BASE_URL (default http://localhost:8000/v1)',
     '  OOM_LLM_MODEL    (default Qwen/Qwen3-0.6B) · OOM_LLM_API_KEY (bearer)',
+    '  OOM_LLM_LANG     (en|zh, default en) — zh: Chinese serial prose + cast',
+    '                   (scripted fallback/padding stays English for now)',
   ].join('\n')
 }
 
@@ -75,12 +85,18 @@ export function parseCli(argv: readonly string[]): Parsed {
     let llm = false
     let llmUrl: string | null = null
     let llmModel: string | null = null
+    let llmLang: 'en' | 'zh' | null = null
+    let pilot: string | null = null
     for (let i = 0; i < rest.length; i++) {
       const a = rest[i]!
       if (a === '--preset') presetName = parsePreset(rest[++i] ?? '')
       else if (a === '--seed') seed = num(rest[++i], '--seed')
       else if (a === '--warp') warp = Math.max(0, num(rest[++i], '--warp'))
-      else if (a === '--llm') llm = true
+      else if (a === '--pilot') {
+        const v = rest[++i]
+        if (v === undefined) throw new Error('--pilot needs a bot name')
+        pilot = v // any roster name; makeBot validates with a friendly error
+      } else if (a === '--llm') llm = true
       else if (a === '--llm-url') {
         const v = rest[++i]
         if (v === undefined) throw new Error('--llm-url needs a value')
@@ -91,10 +107,17 @@ export function parseCli(argv: readonly string[]): Parsed {
         if (v === undefined) throw new Error('--llm-model needs a value')
         llmModel = v
         llm = true
+      } else if (a === '--llm-lang') {
+        const v = rest[++i]
+        if (v !== 'en' && v !== 'zh') throw new Error('--llm-lang needs en|zh')
+        llmLang = v
+        llm = true
       } else throw new Error(`unknown flag '${a}' for play`)
     }
-    if (llm) return { cmd: 'play', preset: presetName, seed, warp, llm: { url: llmUrl, model: llmModel } }
-    return { cmd: 'play', preset: presetName, seed, warp }
+    const out: Extract<Parsed, { cmd: 'play' }> = { cmd: 'play', preset: presetName, seed, warp }
+    if (llm) out.llm = { url: llmUrl, model: llmModel, lang: llmLang }
+    if (pilot !== null) out.pilot = pilot
+    return out
   }
 
   if (cmd === 'sim') {
@@ -177,6 +200,17 @@ async function main(argv: readonly string[]): Promise<number> {
     case 'play': {
       // Wall clock is fine HERE (outside the sim): default seed only.
       const seed = parsed.seed ?? Date.now() % 1_000_000
+      // Pilot mode: build the bot up front so a bad name is a usage error
+      // (friendly makeBot message) before the terminal is touched.
+      let pilot: PilotSpec | undefined
+      if (parsed.pilot !== undefined) {
+        try {
+          pilot = { name: parsed.pilot, bot: makeBot(parsed.pilot) }
+        } catch (err) {
+          console.error(err instanceof Error ? err.message : String(err))
+          return 2
+        }
+      }
       // LLM mode: provider + a one-line status. The in-game bottom-bar
       // flash lives inside GameApp (not reachable from here without
       // touching src/game), so status prints around the session instead.
@@ -185,11 +219,12 @@ async function main(argv: readonly string[]): Promise<number> {
         llm = new LlmProvider({
           baseUrl: parsed.llm.url ?? undefined,
           model: parsed.llm.model ?? undefined,
+          lang: parsed.llm.lang ?? undefined,
         })
         const live = await llm.probe(1500)
         console.log(
           live
-            ? `llm: live — ${llm.model} @ ${llm.baseUrl}`
+            ? `llm: live — ${llm.model} @ ${llm.baseUrl} · lang ${llm.lang}`
             : `llm: unreachable @ ${llm.baseUrl} — degraded (scripted prose, auto-retry in game)`,
         )
       }
@@ -199,6 +234,7 @@ async function main(argv: readonly string[]): Promise<number> {
         presetName: parsed.preset,
         warpTicks: parsed.warp,
         provider: llm,
+        pilot,
       })
       if (llm) {
         const s = llm.stats()

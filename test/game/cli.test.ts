@@ -23,6 +23,26 @@ describe('parseCli', () => {
     expect(() => parseCli(['play', '--bogus'])).toThrow(/unknown flag/)
   })
 
+  test('play --pilot carries the bot name (any roster name; validated at runtime)', () => {
+    expect(parseCli(['play', '--pilot', 'par'])).toEqual({
+      cmd: 'play',
+      preset: 'default',
+      seed: null,
+      warp: 0,
+      pilot: 'par',
+    })
+    expect(parseCli(['play', '--pilot', 'oracle', '--seed', '9', '--warp', '50'])).toEqual({
+      cmd: 'play',
+      preset: 'default',
+      seed: 9,
+      warp: 50,
+      pilot: 'oracle',
+    })
+    expect('pilot' in parseCli(['play'])).toBe(false)
+    expect(() => parseCli(['play', '--pilot'])).toThrow(/--pilot needs a bot name/)
+    expect(usage()).toContain('--pilot')
+  })
+
   test('sim requires --bot; parses rounds/seed/preset/json', () => {
     expect(parseCli(['sim', '--bot', 'recency', '--rounds', '100', '--seed', '42', '--json'])).toEqual({
       cmd: 'sim',
@@ -94,5 +114,11 @@ describe('cli subprocess smoke', () => {
 
     const badBot = run(['sim', '--bot', 'wat', '--rounds', '1'])
     expect(badBot.exitCode).toBe(2)
+
+    // play --pilot with a bad name fails as a usage error BEFORE the
+    // terminal is touched (safe to spawn: no raw mode, no alt screen).
+    const badPilot = run(['play', '--pilot', 'wat', '--seed', '1'])
+    expect(badPilot.exitCode).toBe(2)
+    expect(badPilot.stderr.toString()).toContain("unknown bot 'wat'")
   }, 30_000)
 })

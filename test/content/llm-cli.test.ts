@@ -8,13 +8,13 @@ import { describe, expect, test } from 'bun:test'
 import { parseCli, usage } from '../../src/cli'
 
 describe('parseCli · llm mode', () => {
-  test('--llm enables llm mode with env-default url/model', () => {
+  test('--llm enables llm mode with env-default url/model/lang', () => {
     expect(parseCli(['play', '--llm'])).toEqual({
       cmd: 'play',
       preset: 'default',
       seed: null,
       warp: 0,
-      llm: { url: null, model: null },
+      llm: { url: null, model: null, lang: null },
     })
   })
 
@@ -24,14 +24,44 @@ describe('parseCli · llm mode', () => {
       preset: 'default',
       seed: null,
       warp: 0,
-      llm: { url: 'http://h:1/v1', model: null },
+      llm: { url: 'http://h:1/v1', model: null, lang: null },
     })
     expect(parseCli(['play', '--seed', '7', '--llm-model', 'M', '--llm-url', 'U'])).toEqual({
       cmd: 'play',
       preset: 'default',
       seed: 7,
       warp: 0,
-      llm: { url: 'U', model: 'M' },
+      llm: { url: 'U', model: 'M', lang: null },
+    })
+  })
+
+  test('--llm-lang implies --llm and accepts only en|zh', () => {
+    expect(parseCli(['play', '--llm-lang', 'zh'])).toEqual({
+      cmd: 'play',
+      preset: 'default',
+      seed: null,
+      warp: 0,
+      llm: { url: null, model: null, lang: 'zh' },
+    })
+    expect(parseCli(['play', '--llm', '--llm-lang', 'en'])).toEqual({
+      cmd: 'play',
+      preset: 'default',
+      seed: null,
+      warp: 0,
+      llm: { url: null, model: null, lang: 'en' },
+    })
+    expect(() => parseCli(['play', '--llm-lang'])).toThrow(/--llm-lang needs en\|zh/)
+    expect(() => parseCli(['play', '--llm-lang', 'fr'])).toThrow(/--llm-lang needs en\|zh/)
+  })
+
+  test('--llm-lang combines with pilot and seed (recording invocation shape)', () => {
+    expect(parseCli(['play', '--pilot', 'par', '--llm', '--llm-lang', 'zh', '--seed', '7'])).toEqual({
+      cmd: 'play',
+      preset: 'default',
+      seed: 7,
+      warp: 0,
+      llm: { url: null, model: null, lang: 'zh' },
+      pilot: 'par',
     })
   })
 
@@ -47,8 +77,10 @@ describe('parseCli · llm mode', () => {
   test('usage documents llm mode and its env vars', () => {
     const u = usage()
     expect(u).toContain('--llm')
+    expect(u).toContain('--llm-lang en|zh')
     expect(u).toContain('OOM_LLM_BASE_URL')
     expect(u).toContain('OOM_LLM_MODEL')
     expect(u).toContain('OOM_LLM_API_KEY')
+    expect(u).toContain('OOM_LLM_LANG')
   })
 })

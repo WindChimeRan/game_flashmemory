@@ -19,6 +19,15 @@ export interface ContentProvider {
    * spec.seed.
    */
   nextChunk(spec: ChunkSpec): AsyncIterable<string>
+
+  /**
+   * Optional: the display name of a glyph's recurring character in the
+   * provider's story language (e.g. the Chinese cast when the LLM
+   * narrates in zh), so chunk headers match the prose. Pure, total,
+   * deterministic — never I/O. When absent the game falls back to the
+   * scripted English cast (characterFor).
+   */
+  nameFor?(glyph: string): string
 }
 
 /**

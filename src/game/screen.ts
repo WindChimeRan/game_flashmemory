@@ -34,7 +34,7 @@ import type { Layout } from '../pretext'
 import type { ChunkView, RoundResult, SimView, WaveView } from '../sim'
 import { TIER_EXPANDED, TIER_SUMMARY } from '../sim'
 import { characterFor } from '../content/scripted'
-import { cellWidth, graphemes } from '../shared/width'
+import { cellWidth, graphemes, stringWidth } from '../shared/width'
 import type { TweenSample } from './anim'
 import {
   CORRUPT_TABLE,
@@ -84,6 +84,14 @@ export interface ScreenState {
   readonly over: OverState | null
   /** Terminal below minimum size: render the friendly message instead. */
   readonly tooSmall: boolean
+  /**
+   * Story-language character name per glyph (ContentProvider.nameFor seam);
+   * absent → the scripted English cast (characterFor).
+   */
+  readonly nameFor?: (glyph: string) => string
+  /** Bot name when a pilot drives the actions — rendered as an honest
+   *  PILOT tag in the bottom bar. Absent/null = human at the keys. */
+  readonly pilot?: string | null
 }
 
 // ── geometry ─────────────────────────────────────────────────────────────
@@ -242,6 +250,31 @@ function wrapText(text: string, width: number, maxLines: number): string[] {
 
 const truncate = (s: string, n: number): string => (s.length <= n ? s : s.slice(0, Math.max(0, n - 1)) + '…')
 
+/** Character name in the story language (provider seam; scripted fallback). */
+function displayName(state: ScreenState, glyph: string): string {
+  return state.nameFor?.(glyph) ?? characterFor(glyph).name
+}
+
+/** Truncate to `cells` terminal cells (… when over) and pad — CJK-safe.
+ *  For ASCII this matches truncate(s, cells).padEnd(cells) exactly. */
+function padCells(s: string, cells: number): string {
+  let out = s
+  let w = stringWidth(s)
+  if (w > cells) {
+    out = ''
+    w = 0
+    for (const g of graphemes(s)) {
+      const gw = cellWidth(g)
+      if (w + gw > cells - 1) break
+      out += g
+      w += gw
+    }
+    out += '…'
+    w += 1
+  }
+  return out + ' '.repeat(Math.max(0, cells - w))
+}
+
 // ── story (left column) ──────────────────────────────────────────────────
 
 interface Ctx {
@@ -276,7 +309,7 @@ function drawHeader(ctx: Ctx, b: ChunkBlock, c: ChunkView, row: number): void {
   x += 2
   x += grid.text(row, x, pipMarks(c.pips), UI.dim, undefined, dim)
   x += 1
-  const name = truncate(characterFor(c.glyph).name, 16).padEnd(16)
+  const name = padCells(displayName(state, c.glyph), 16)
   x += grid.text(row, x, name, hc, undefined, dim | bold)
   x += 1
   x += grid.text(row, x, bar(c.heat, 5, '█', '·'), hc, undefined, dim)
@@ -544,14 +577,25 @@ function drawBottom(ctx: Ctx): void {
       x += 2
       grid.set(row, x, c.glyph, heatColor(c.glyph, c.heat), undefined, ATTR_REVERSE | ATTR_BOLD)
       x += 2
-      const info = `${characterFor(c.glyph).name} · ${TIER_NAME[c.tier]}${c.pinned ? ' · pinned' : ''}${c.protected ? ' · protected' : ''}`
+      const info = `${displayName(state, c.glyph)} · ${TIER_NAME[c.tier]}${c.pinned ? ' · pinned' : ''}${c.protected ? ' · protected' : ''}`
       grid.text(row, x, truncate(info, 36), UI.dim)
-    } else {
+    } else if (!state.pilot) {
       grid.text(row, 2, 'j/k to focus a chunk', UI.faint, undefined, ATTR_DIM)
     }
   }
-  const hx = state.cols - HINTS.length - 2
-  if (hx > 43) grid.text(row, hx, HINTS, UI.faint, undefined, ATTR_DIM)
+  // right side: key hints — or the honest PILOT tag (keys shrink to ␣/q)
+  if (state.pilot) {
+    const tag = ` PILOT ${state.pilot} `
+    const keys = '␣·pause q·quit'
+    const hx = state.cols - (tag.length + 1 + keys.length) - 2
+    if (hx > 43) {
+      grid.text(row, hx, tag, UI.accent, undefined, ATTR_BOLD | ATTR_REVERSE)
+      grid.text(row, hx + tag.length + 1, keys, UI.faint, undefined, ATTR_DIM)
+    }
+  } else {
+    const hx = state.cols - HINTS.length - 2
+    if (hx > 43) grid.text(row, hx, HINTS, UI.faint, undefined, ATTR_DIM)
+  }
 }
 
 // ── death / survival screen ──────────────────────────────────────────────

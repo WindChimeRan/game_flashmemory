@@ -16,9 +16,17 @@
  *   deterministic ScriptedProvider stream for the same spec — total
  *   failure reproduces ScriptedProvider verbatim; an early model stop pads
  *   the tail from scripted (logged) so ≥ spec.targetTokens pieces always
- *   arrive, each shaped like scripted's: a single word + trailing space.
+ *   arrive. Latin pieces keep scripted's shape (a single word + trailing
+ *   space); CJK prose has no spaces, so wide-grapheme runs split into
+ *   1–2-grapheme pieces (splitPieces below) so the 1-piece-per-tick reveal
+ *   still flows.
  * - Narrative consistency: prompts are built from scripted.ts's per-glyph
- *   character table and per-theme motifs (imported, not duplicated).
+ *   character table and per-theme motifs (imported, not duplicated). In zh
+ *   mode (lang: 'zh' / --llm-lang zh / OOM_LLM_LANG) prompts ask for one
+ *   Chinese serial paragraph featuring a parallel Chinese cast (CAST_ZH).
+ *   HONESTY NOTE: scripted fallback/padding is English-only for now — a zh
+ *   chunk that stalls or stops early is padded with ENGLISH scripted prose.
+ *   Accepted and flagged; the fallback narrator has no zh voice yet.
  *
  * Buffer-ahead: `lookahead` (default 2) caps concurrent generations. The
  * game calls nextChunk in spawn order; jobs beyond the cap queue FIFO in an
@@ -39,8 +47,12 @@
 
 import type { ChunkSpec } from '../sim/types'
 import type { ContentProvider } from './types'
-import { characterFor, motifsFor, scriptedPieces } from './scripted'
+import { characterFor, motifsFor, scriptedPieces, type Character } from './scripted'
 import { createSanitizer, type StreamSanitizer } from './sanitize'
+import { cellWidth, graphemes } from '../shared/width'
+
+/** Story language for prompts + character names ('en' default). */
+export type LlmLang = 'en' | 'zh'
 
 export interface LlmProviderOptions {
   /** OpenAI-compatible base, e.g. http://localhost:8000/v1 (env OOM_LLM_BASE_URL). */
@@ -49,6 +61,12 @@ export interface LlmProviderOptions {
   model?: string
   /** Optional bearer token (env OOM_LLM_API_KEY). */
   apiKey?: string
+  /**
+   * Story language (env OOM_LLM_LANG; default 'en'). 'zh' prompts for one
+   * Chinese serial paragraph per chunk and switches the cast to CAST_ZH.
+   * Scripted fallback/padding stays English (no zh narrator yet — flagged).
+   */
+  lang?: LlmLang
   /** Max concurrent chunk generations (prefetch lanes). Default 2. */
   lookahead?: number
   /** Sampling temperature. Default 0.8 (§5.4: modest). */
@@ -86,7 +104,7 @@ export interface LlmStats {
 export interface LlmJobInfo {
   /** Non-empty content deltas received (≈ tokens for vLLM). */
   deltas: number
-  /** Sanitized words produced by the model (before any padding). */
+  /** Sanitized reveal pieces produced by the model (before any padding). */
   words: number
   ttfwMs: number | null
   genMs: number | null
@@ -96,8 +114,8 @@ interface Job {
   readonly spec: ChunkSpec
   readonly sanitizer: StreamSanitizer
   readonly abort: AbortController
-  words: string[] // sanitized complete words (no trailing space)
-  partial: string // word fragment awaiting its delimiter
+  words: string[] // sanitized settled pieces, whitespace included (splitPieces)
+  partial: string // unsettled tail awaiting more text (splitPieces rest)
   deltas: number
   started: boolean
   done: boolean
@@ -118,9 +136,110 @@ function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
+// ── CJK-aware piece splitting (pure) ─────────────────────────────────────
+
+/** CJK punctuation that clings to the piece before it (never starts one). */
+const CLING_PUNCT = new Set([
+  '。', '，', '、', '！', '？', '；', '：', '…',
+  '”', '’', '）', '」', '』', '】', '》', '〉',
+])
+
+export interface PieceSplit {
+  /** Settled reveal pieces, whitespace included (Latin words carry ' '). */
+  pieces: string[]
+  /** Unsettled tail — re-feed as `rest + nextDelta`. Empty when final. */
+  rest: string
+}
+
+/**
+ * Split sanitized prose (single-space whitespace, see sanitize.ts) into
+ * reveal pieces:
+ * - whitespace-delimited Latin/narrow runs stay whole words, trailing
+ *   space attached (synthesized at end of stream — scripted's shape);
+ * - whitespace-free runs of wide graphemes (CJK prose) split into pieces
+ *   of 1–2 graphemes (graphemes() + cellWidth(g) === 2);
+ * - CJK punctuation (。，、！？…) clings to the preceding piece; a full
+ *   2-grapheme piece re-splits 1+1 so punctuated pieces stay ≤ 2 graphemes.
+ *
+ * Streaming (`final = false`) keeps the unsettled tail in `rest` — the
+ * open run, or a closed last piece that punctuation could still cling to
+ * (one not sealed by a space) — so a re-split of `rest + delta` never
+ * contradicts already-emitted pieces. Space-sealed pieces emit at the same
+ * cadence the old word splitter had.
+ */
+export function splitPieces(text: string, final: boolean): PieceSplit {
+  const pieces: string[] = []
+  let run: string[] = [] // graphemes of the piece under construction
+  let latin = false // run is a narrow word: closes on space / punct / CJK
+
+  const close = (extra = ''): void => {
+    if (run.length > 0 || extra !== '') pieces.push(run.join('') + extra)
+    run = []
+    latin = false
+  }
+  /** Append to the latest closed piece (cling) — never across a space. */
+  const clingTo = (s: string): boolean => {
+    const last = pieces.length - 1
+    if (last < 0 || pieces[last]!.endsWith(' ')) return false
+    pieces[last]! += s
+    return true
+  }
+
+  for (const g of graphemes(text)) {
+    if (g === ' ') {
+      if (run.length > 0) close(' ')
+      else if (!clingTo(' ')) {
+        /* leading space: dropped (sanitizer trims; defensive) */
+      }
+      continue
+    }
+    if (CLING_PUNCT.has(g)) {
+      if (latin && run.length > 0) {
+        run.push(g)
+        close()
+      } else if (run.length === 2) {
+        // a held wide pair re-splits 1+1 so the punctuated piece stays ≤ 2
+        pieces.push(run[0]!)
+        pieces.push(run[1]! + g)
+        run = []
+        latin = false
+      } else if (run.length === 1) {
+        run.push(g)
+        close()
+      } else if (!clingTo(g)) {
+        close(g) // degenerate: leading punctuation stands alone
+      }
+      continue
+    }
+    if (cellWidth(g) === 2) {
+      if (latin && run.length > 0) close() // word→CJK boundary (no space in source)
+      latin = false
+      if (run.length === 2) close() // wide pair held until its follower decides
+      run.push(g)
+      continue
+    }
+    // narrow non-space: a Latin-ish word grows until whitespace
+    if (!latin && run.length > 0) close() // CJK→word boundary
+    latin = true
+    run.push(g)
+  }
+
+  if (final) {
+    if (run.length > 0) close(latin ? ' ' : '') // last Latin word gets its space
+    return { pieces, rest: '' }
+  }
+  if (run.length > 0) return { pieces, rest: run.join('') } // open run = the tail
+  const last = pieces.length > 0 ? pieces[pieces.length - 1]! : ''
+  if (last !== '' && !last.endsWith(' ')) {
+    return { pieces: pieces.slice(0, -1), rest: last } // punct could still cling
+  }
+  return { pieces, rest: '' }
+}
+
 export class LlmProvider implements ContentProvider {
   readonly baseUrl: string
   readonly model: string
+  readonly lang: LlmLang
 
   private readonly apiKey: string | undefined
   private readonly lookahead: number
@@ -148,6 +267,7 @@ export class LlmProvider implements ContentProvider {
     const env = typeof process !== 'undefined' ? process.env : {}
     this.baseUrl = (opts.baseUrl ?? env.OOM_LLM_BASE_URL ?? 'http://localhost:8000/v1').replace(/\/+$/, '')
     this.model = opts.model ?? env.OOM_LLM_MODEL ?? 'Qwen/Qwen3-0.6B'
+    this.lang = opts.lang ?? (env.OOM_LLM_LANG === 'zh' ? 'zh' : 'en')
     this.apiKey = opts.apiKey ?? env.OOM_LLM_API_KEY
     this.lookahead = Math.max(1, Math.floor(opts.lookahead ?? 2))
     this.temperature = opts.temperature ?? 0.8
@@ -204,6 +324,11 @@ export class LlmProvider implements ContentProvider {
     const job = this.acquireJob(spec)
     if (job === null) return this.scriptedStream(spec)
     return this.streamJob(job)
+  }
+
+  /** ContentProvider.nameFor — chunk headers match the story language. */
+  nameFor(glyph: string): string {
+    return (this.lang === 'zh' ? characterZhFor(glyph) : characterFor(glyph)).name
   }
 
   // ── job lifecycle ───────────────────────────────────────────────────────
@@ -332,7 +457,7 @@ export class LlmProvider implements ContentProvider {
   private request(job: Job, withTemplateKwargs: boolean): Promise<Response> {
     const body: Record<string, unknown> = {
       model: this.model,
-      messages: buildMessages(job.spec),
+      messages: buildMessages(job.spec, this.lang),
       temperature: this.temperature,
       max_tokens: this.maxTokens,
       stream: true,
@@ -401,43 +526,36 @@ export class LlmProvider implements ContentProvider {
     return false
   }
 
-  /** Sanitized text → whole words (single space delimited by sanitizer). */
+  /** Sanitized text → settled reveal pieces (splitPieces; CJK-aware). */
   private acceptText(job: Job, sanitized: string): void {
     if (sanitized === '') return
-    job.partial += sanitized
-    const parts = job.partial.split(' ')
-    job.partial = parts.pop() ?? ''
-    let any = false
-    for (const w of parts) {
-      if (w !== '') {
-        job.words.push(w)
-        any = true
-      }
-    }
-    if (any) {
-      job.lastWordAt = this.now()
-      if (job.firstWordAt === null) job.firstWordAt = job.lastWordAt
-      this.wake(job)
-    }
+    const { pieces, rest } = splitPieces(job.partial + sanitized, false)
+    job.partial = rest
+    this.pushPieces(job, pieces)
   }
 
   private finishWords(job: Job): void {
-    this.acceptText(job, job.sanitizer.flush())
-    if (job.partial !== '') {
-      job.words.push(job.partial)
-      job.partial = ''
-      job.lastWordAt = this.now()
-      if (job.firstWordAt === null) job.firstWordAt = job.lastWordAt
-      this.wake(job)
-    }
+    const { pieces } = splitPieces(job.partial + job.sanitizer.flush(), true)
+    job.partial = ''
+    this.pushPieces(job, pieces)
+  }
+
+  private pushPieces(job: Job, pieces: readonly string[]): void {
+    if (pieces.length === 0) return
+    job.words.push(...pieces)
+    job.lastWordAt = this.now()
+    if (job.firstWordAt === null) job.firstWordAt = job.lastWordAt
+    this.wake(job)
   }
 
   // ── the chunk stream (consumer side) ────────────────────────────────────
 
   /**
-   * Yield live words instantly as they land in the buffer; on a stall
+   * Yield live pieces instantly as they land in the buffer; on a stall
    * (budgets exceeded) or early stop, finish the chunk from scripted. The
-   * piece shape and the ≥ targetTokens guarantee match ScriptedProvider.
+   * ≥ targetTokens guarantee matches ScriptedProvider; pieces arrive
+   * whitespace-included (Latin: word + trailing space, scripted's shape;
+   * CJK: 1–2 graphemes, no artificial spaces).
    */
   private async *streamJob(job: Job): AsyncGenerator<string, void, undefined> {
     const spec = job.spec
@@ -453,14 +571,14 @@ export class LlmProvider implements ContentProvider {
           // pulling exactly there, which tears this generator down at the
           // yield — code after the loop never runs for a consumed chunk.
           if (sent === target) this.stats_.live++
-          yield `${w} `
+          yield w
           continue
         }
         if (job.done) break
         if (this.isStalled(job)) {
           job.abandoned = true
           job.abort.abort()
-          this.enterDegraded(`chunk ${spec.chunkId}: stream stalled after ${sent} words — scripted takes over mid-chunk`)
+          this.enterDegraded(`chunk ${spec.chunkId}: stream stalled after ${sent} pieces — scripted takes over mid-chunk`)
           break
         }
         await this.waitProgress(job)
@@ -477,7 +595,8 @@ export class LlmProvider implements ContentProvider {
       }
       // partial chunk: pad seamlessly from scripted for the same spec
       // (counted up front — the consumer stops pulling at target, which
-      // would tear the generator down before a post-loop count).
+      // would tear the generator down before a post-loop count). NOTE:
+      // scripted padding is English even in zh mode (no zh narrator yet).
       this.stats_.padded++
       let padded = 0
       for (const piece of scriptedPieces(spec)) {
@@ -486,7 +605,7 @@ export class LlmProvider implements ContentProvider {
         padded++
         yield piece
       }
-      this.log(`chunk ${spec.chunkId}: model gave ${live}/${target} words — padded +${padded} from scripted`)
+      this.log(`chunk ${spec.chunkId}: model gave ${live}/${target} pieces — padded +${padded} from scripted`)
     } finally {
       if (!job.done) {
         job.abandoned = true // consumer left early — stop the network side
@@ -542,9 +661,65 @@ export class LlmProvider implements ContentProvider {
   }
 }
 
+// ── the zh cast (wuxia/sci-fi serial regulars, parallel to scripted CAST) ─
+
+/** 10 recurring zh characters; glyph A–Z maps onto them deterministically. */
+const CAST_ZH: readonly Character[] = [
+  { name: '顾长风', title: '残骸打捞船长', prop: '一枚黄铜星盘' },
+  { name: '沈雁回', title: '引擎巫师', prop: '她的线圈重锤' },
+  { name: '楚天阙', title: '走私僧', prop: '一把伪造的圣物钥匙' },
+  { name: '苏挽星', title: '虚空信使', prop: '一只封缄的急件箱' },
+  { name: '萧夜阑', title: '遗物外科医师', prop: '一柄玻璃骨锯' },
+  { name: '白浅墨', title: '风暴领航员', prop: '一只开裂的气压计' },
+  { name: '凌虚子', title: '信号修士', prop: '一支银质音叉' },
+  { name: '洛繁霜', title: '星图窃贼', prop: '一管自蘸墨的羽笔' },
+  { name: '燕惊鸿', title: '赏金档案官', prop: '一座磁石罗盘' },
+  { name: '墨千机', title: '夜测绘师', prop: '一架黑曜石经纬仪' },
+]
+
+/** zh character for a glyph (total: unknown glyphs get a deterministic stranger). */
+export function characterZhFor(glyph: string): Character {
+  const key = glyph.length > 0 ? glyph[0]!.toUpperCase() : '?'
+  const code = key.charCodeAt(0)
+  if (code >= 65 && code <= 90) return CAST_ZH[(code - 65) % CAST_ZH.length]!
+  return { name: '无名客', title: '陌路人', prop: '一枚无铭的信物' }
+}
+
+/** Director themes in zh (prompt flavor only; falls back to the raw word). */
+const THEME_ZH: Record<string, string> = {
+  archive: '秘档库',
+  harbor: '锈水码头',
+  signal: '信号塔',
+  orchard: '嫁接果园',
+  engine: '引擎舱',
+  letters: '密信驿路',
+  frontier: '边荒拓地',
+  relic: '遗物圣所',
+  market: '夜市黑集',
+  storm: '风暴前线',
+}
+
 // ── prompt (spec → messages; §5.4: structured spec, one vivid paragraph) ──
 
-export function buildMessages(spec: ChunkSpec): { role: string; content: string }[] {
+export function buildMessages(spec: ChunkSpec, lang: LlmLang = 'en'): { role: string; content: string }[] {
+  if (lang === 'zh') {
+    const who = characterZhFor(spec.glyph)
+    const theme = THEME_ZH[spec.theme] ?? spec.theme
+    return [
+      {
+        role: 'system',
+        content:
+          '你是连载小说《OOM》的叙述者——一部永不完结的科幻武侠通俗连载。文风浓烈、紧凑、具体可感;短句铿锵;每段结尾都悬着钩子。' +
+          '只回复一段40到80字的中文正文。不要标题、不要列表、不要引号包裹、不要表情符号、不要任何解说。',
+      },
+      {
+        role: 'user',
+        content:
+          `续写连载的下一段。本段主角:${who.name},${who.title},随身带着${who.prop}。场景:${theme}。` +
+          '只写一段中文,40到80字,生动浓烈,以悬念收尾。',
+      },
+    ]
+  }
   const who = characterFor(spec.glyph)
   const motifs = motifsFor(spec.theme)
   const m = motifs.slice(0, 3).join('; ')

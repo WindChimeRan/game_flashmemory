@@ -17,11 +17,16 @@
  * to the output stream (friction noted; full stop()/start() would blank
  * the alt screen and hide the very prose the player wants to copy).
  * Focus loss auto-pauses. Rejected actions flash their reason.
+ *
+ * Pilot mode (--pilot): a roster bot sources the actions each tick with
+ * the headless runner's ordering (act(view) → tick); the keyboard keeps
+ * ␣ pause and q-q quit, and the bottom bar carries a PILOT tag.
  */
 
 import {
   createSim,
   type Action,
+  type BotPolicy,
   type DeathInfo,
   type RejectReason,
   type Sim,
@@ -190,12 +195,34 @@ export function warpHousekeeping(view: SimView): Action[] {
   return pick ? [{ kind: 'down', chunkId: pick.id }] : []
 }
 
+/**
+ * A bot in the pilot seat (--pilot): structurally the runner's OomBot —
+ * configure() gets rules knowledge, wantsOracle bots get the oracle view.
+ */
+export interface PilotBot extends BotPolicy {
+  configure?(config: SimConfig): void
+  readonly wantsOracle?: boolean
+}
+
+export interface PilotSpec {
+  /** Roster name, rendered as the bottom-bar PILOT tag (honest labeling). */
+  readonly name: string
+  readonly bot: PilotBot
+}
+
 export interface GameAppOptions {
   config: SimConfig
   seed: number
   presetName?: string
   term?: Term
   provider?: ContentProvider
+  /**
+   * Pilot mode: this bot sources the ACTIONS each tick with the headless
+   * runner's per-tick ordering (bot.act(view) → sim.tick); the keyboard
+   * keeps ␣ pause and q-q quit only. With the scripted provider a pilot
+   * round replays exactly (same hashes as bots/runner for bot+seed+config).
+   */
+  pilot?: PilotSpec
   /** Raw escape-sequence sink for the pause mouse toggle (default: none
    *  when a term is injected, process.stdout otherwise). */
   rawOut?: { write(s: string): boolean } | null
@@ -226,6 +253,7 @@ export class GameApp {
 
   private readonly presetName: string
   private readonly provider: ContentProvider
+  private readonly pilot: PilotSpec | null
   private readonly rawOut: { write(s: string): boolean } | null
   private readonly ownsTerm: boolean
   private readonly warpTicks: number
@@ -247,11 +275,23 @@ export class GameApp {
     this.ownsTerm = opts.term === undefined
     this.term = opts.term ?? createTerm({ mouse: true })
     this.provider = opts.provider ?? new ScriptedProvider()
+    this.pilot = opts.pilot ?? null
     this.rawOut =
       opts.rawOut !== undefined ? opts.rawOut : this.ownsTerm ? process.stdout : null
     this.warpTicks = Math.max(0, opts.warpTicks ?? 0)
     this.sim = createSim(this.config, this.seed)
     this.prose = new ProseStore(this.provider, proseWidth(this.term.cols))
+    if (this.pilot) {
+      this.pilot.bot.configure?.(this.config) // runner's pre-round ordering
+      this.pilot.bot.reset(this.seed)
+    }
+  }
+
+  /** Pilot actions for the NEXT tick — bots/runner.ts's per-tick ordering. */
+  private pilotActions(): Action[] {
+    const bot = this.pilot!.bot
+    const oracle = bot.wantsOracle === true ? this.sim.oracleView() : null
+    return bot.act(oracle ?? this.sim.view(), oracle)
   }
 
   private checkOver(death: DeathInfo | null): void {
@@ -274,10 +314,11 @@ export class GameApp {
     this.frame(nowMs)
   }
 
-  /** Fast-forward (see GameAppOptions.warpTicks). Deterministic. */
+  /** Fast-forward (see GameAppOptions.warpTicks). Deterministic. A pilot
+   *  flies the warp too, so warp+pilot still matches the headless runner. */
   private warp(ticks: number): void {
     for (let i = 0; i < ticks && !this.sim.done; i++) {
-      const actions = warpHousekeeping(this.sim.view())
+      const actions = this.pilot ? this.pilotActions() : warpHousekeeping(this.sim.view())
       const ev = this.sim.tick(actions)
       if (actions.length > 0) this.actionLog.push({ tick: this.sim.tickNow, actions })
       for (const id of ev.spawned) this.prose.ensure(this.sim.chunkSpec(id))
@@ -322,7 +363,10 @@ export class GameApp {
     const beforeTops = new Map(beforeGeo.blocks.map((b) => [b.id, b.top]))
     const beforeView = beforeState.view
 
-    const actions = this.pending.splice(0, this.config.actionBudget)
+    // Action source: the pilot bot (runner ordering) or the player queue.
+    const actions = this.pilot
+      ? this.pilotActions()
+      : this.pending.splice(0, this.config.actionBudget)
     const ev = this.sim.tick(actions)
     const tick = this.sim.tickNow
     if (actions.length > 0) this.actionLog.push({ tick, actions })
@@ -479,6 +523,9 @@ export class GameApp {
       else if (cmd?.t === 'quit') this.exit(0)
       return
     }
+    // Pilot mode: the bot owns gameplay — keys keep ␣ pause / q-q quit only
+    // (so during quit-confirm, ␣ cancels and q quits; others stay inert).
+    if (this.pilot && cmd !== null && cmd.t !== 'pause' && cmd.t !== 'quit') return
     if (this.confirmQuit) {
       this.confirmQuit = false
       if (cmd?.t === 'quit') this.exit(0)
@@ -560,6 +607,7 @@ export class GameApp {
     this.lastActionLog = this.actionLog
     this.actionLog = []
     this.sim = createSim(this.config, this.seed)
+    this.pilot?.bot.reset(this.seed)
     this.prose = new ProseStore(this.provider, proseWidth(this.term.cols))
     this.tweens.clear()
     this.pending = []
@@ -604,6 +652,8 @@ export class GameApp {
       ticksPerSec: this.config.ticksPerSec,
       over: this.over,
       tooSmall: this.tooSmall,
+      nameFor: this.provider.nameFor?.bind(this.provider),
+      pilot: this.pilot?.name ?? null,
     }
   }
 }
