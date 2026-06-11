@@ -8,13 +8,24 @@
  *    survival-fraction ratios (gate 1/2), strict reactive<greedy, vacuous
  *    legibility on zero deaths, and gate 6 measured in SECONDS (§7 says
  *    2–4 minutes — ticks alone are the wrong unit).
+ *  - saturation fallback (formulation fix, see PLAYTEST.md): gates 1/2
+ *    compare on pareto iff BOTH bots of a comparison have survival ≥ 0.95,
+ *    with the §7 thresholds unchanged; below saturation survival ratios
+ *    are untouched.
  *  - parseArgs: defaults, full flags, and hard rejection of bad input.
  */
 
 import { describe, expect, test } from 'bun:test'
 import type { RoundResult, WaveResolution } from '../../src/sim'
 import type { BotSummary, RoundDetail } from '../../src/bots'
-import { evaluateGates, nearMissStats, parseArgs, type NearMiss } from '../../scripts/gates'
+import {
+  SURVIVAL_SATURATION,
+  evaluateGates,
+  nearMissStats,
+  pairMetric,
+  parseArgs,
+  type NearMiss,
+} from '../../scripts/gates'
 
 // ── fabrication helpers ──────────────────────────────────────────────────
 
@@ -79,6 +90,11 @@ interface Knobs {
   recency?: number
   random?: number
   reactive?: number
+  oracleP?: number
+  greedyP?: number
+  recencyP?: number
+  randomP?: number
+  reactiveP?: number
   aps?: number
   frac?: number
   greedyMedianTicks?: number
@@ -87,14 +103,19 @@ interface Knobs {
 
 function gates(k: Knobs = {}) {
   const s: Record<string, BotSummary> = {
-    oracle: summary('oracle', { meanSurvivalFrac: k.oracle ?? 0.92, meanActionsPerSec: k.aps ?? 0.5 }),
+    oracle: summary('oracle', {
+      meanSurvivalFrac: k.oracle ?? 0.92,
+      meanPareto: k.oracleP ?? 0.5,
+      meanActionsPerSec: k.aps ?? 0.5,
+    }),
     'greedy-heat': summary('greedy-heat', {
       meanSurvivalFrac: k.greedy ?? 0.8,
+      meanPareto: k.greedyP ?? 0.5,
       medianTicksSurvived: k.greedyMedianTicks ?? 1800,
     }),
-    recency: summary('recency', { meanSurvivalFrac: k.recency ?? 0.4 }),
-    'random-k': summary('random-k', { meanSurvivalFrac: k.random ?? 0.45 }),
-    reactive: summary('reactive', { meanSurvivalFrac: k.reactive ?? 0.63 }),
+    recency: summary('recency', { meanSurvivalFrac: k.recency ?? 0.4, meanPareto: k.recencyP ?? 0.5 }),
+    'random-k': summary('random-k', { meanSurvivalFrac: k.random ?? 0.45, meanPareto: k.randomP ?? 0.5 }),
+    reactive: summary('reactive', { meanSurvivalFrac: k.reactive ?? 0.63, meanPareto: k.reactiveP ?? 0.5 }),
   }
   const nearMiss: NearMiss = { late: 0, resolved: 10, frac: k.frac ?? 0.3 }
   const deaths = (k.deaths ?? []).map((d, i) =>
@@ -152,6 +173,51 @@ describe('evaluateGates thresholds', () => {
     expect(byId(gates({ oracle: 1.0, reactive: 0.7 }), 2).pass).toBe(true) // exactly 0.70
     expect(byId(gates({ oracle: 1.0, reactive: 0.701 }), 2).pass).toBe(false)
     expect(byId(gates({ reactive: 0.8, greedy: 0.8 }), 2).pass).toBe(false) // == greedy ⇒ fail
+  })
+
+  // ── saturation fallback (formulation fix, see PLAYTEST.md) ────────────
+
+  test('pairMetric: pareto iff BOTH survivals ≥ 0.95 (inclusive); survival otherwise', () => {
+    const mk = (surv: number, pareto: number) => summary('x', { meanSurvivalFrac: surv, meanPareto: pareto })
+    expect(SURVIVAL_SATURATION).toBe(0.95)
+    expect(pairMetric(mk(0.95, 0.3), mk(1.0, 0.6))).toEqual({ a: 0.3, b: 0.6, metric: 'pareto' })
+    expect(pairMetric(mk(0.949, 0.3), mk(1.0, 0.6))).toEqual({ a: 0.949, b: 1.0, metric: 'surv' })
+    expect(pairMetric(mk(1.0, 0.3), mk(0.4, 0.6))).toEqual({ a: 1.0, b: 0.4, metric: 'surv' })
+  })
+
+  test('gate 2 fallback: both saturated ⇒ pareto with UNCHANGED thresholds', () => {
+    // reactive/oracle on pareto: 0.35/0.50 = 0.70 ≤ 0.70 ok; 0.351 fails.
+    const sat = { oracle: 1.0, reactive: 0.99, greedy: 0.97 }
+    const g = byId(gates({ ...sat, oracleP: 0.5, reactiveP: 0.35, greedyP: 0.4 }), 2)
+    expect(g.pass).toBe(true)
+    expect(g.measured['reactiveOverOracleMetric']).toBe('pareto')
+    expect(g.measured['reactiveVsGreedyMetric']).toBe('pareto')
+    expect(byId(gates({ ...sat, oracleP: 0.5, reactiveP: 0.351, greedyP: 0.4 }), 2).pass).toBe(false)
+    // reactive ≥ greedy on pareto fails sub-condition (b) even when (a) holds.
+    expect(byId(gates({ ...sat, oracleP: 0.5, reactiveP: 0.35, greedyP: 0.3 }), 2).pass).toBe(false)
+  })
+
+  test('gate 2 below saturation keeps survival ratios even when pareto would disagree', () => {
+    // reactive 0.63 < 0.95: survival path (0.63/0.92 ≤ 0.7, 0.63 < 0.8 ⇒ pass)
+    // despite reactive pareto ABOVE both oracle's and greedy's.
+    const g = byId(gates({ reactiveP: 0.9, oracleP: 0.2, greedyP: 0.2 }), 2)
+    expect(g.pass).toBe(true)
+    expect(g.measured['reactiveOverOracleMetric']).toBe('surv')
+  })
+
+  test('gate 1 fallback: saturated oracle/greedy pair compares pareto; sub-saturated pairs keep survival', () => {
+    // oracle and greedy both ≥ 0.95 ⇒ (b) on pareto; recency/random stay survival.
+    const k: Knobs = {
+      oracle: 1.0, greedy: 0.97, recency: 0.4, random: 0.45,
+      oracleP: 0.55, greedyP: 0.2,
+    }
+    const g = byId(gates(k), 1)
+    expect(g.pass).toBe(true) // 0.55 ≥ 1.15·0.20; greedy/recency on survival 0.97 ≥ 1.15·0.4
+    expect(g.measured['oracleOverGreedyMetric']).toBe('pareto')
+    expect(g.measured['greedyOverRecencyMetric']).toBe('surv')
+    expect(g.measured['recencyOverOracleMetric']).toBe('surv')
+    // Same shape but oracle pareto below 1.15×greedy pareto ⇒ (b) fails.
+    expect(byId(gates({ ...k, oracleP: 0.22 }), 1).pass).toBe(false)
   })
 
   test('gate 3: aps band [0.3, 1.0] inclusive', () => {

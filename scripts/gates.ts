@@ -8,14 +8,23 @@
  * tuning lands — this script's job is to MEASURE correctly, not to pass.
  *
  * Gate operationalization (documented because §7 uses prose):
- *  1 recency-trap   recency ≤ 60% of oracle survival; oracle ≥ 1.15×greedy;
+ *  1 recency-trap   recency ≤ 60% of oracle; oracle ≥ 1.15×greedy;
  *                   greedy ≥ 1.15×recency; |recency − random| ≤ max(0.10,
- *                   0.15×max(recency, random))            [mean survival frac]
- *  2 commitment     reactive ≤ 70% of oracle survival AND reactive < greedy
+ *                   0.15×max(recency, random)). Each pairwise comparison is
+ *                   on mean survival frac UNLESS both bots are saturated
+ *                   (≥ SURVIVAL_SATURATION), in which case the SAME ratio
+ *                   thresholds apply to mean pareto — formulation fix, see
+ *                   PLAYTEST.md (survival ratios are mathematically
+ *                   unsatisfiable at the ceiling).
+ *  2 commitment     reactive ≤ 70% of oracle AND reactive < greedy, with
+ *                   the same saturation fallback per comparison
+ *                   (formulation fix, see PLAYTEST.md).
  *  3 decision-density   oracle mean accepted actions/sec ∈ [0.3, 1.0]
- *  4 near-miss      fraction of oracle's resolved waves whose
+ *  4 near-miss      fraction of reactive+greedy resolved waves whose
  *                   lastHelpfulArrival falls in the final 25% of the
- *                   telegraph window ∈ [0.2, 0.4]
+ *                   telegraph window ∈ [0.2, 0.4] — formulation fix, see
+ *                   PLAYTEST.md: oracle's deliberate early-fetch safety
+ *                   margin made it the wrong probe for human-like tension.
  *  5 death-legibility   legible deaths / deaths ≥ 90% over greedy-heat +
  *                   reactive deaths (vacuously 1 when no deaths)
  *  6 session-shape  greedy-heat median round length ∈ [120, 240] seconds
@@ -98,6 +107,31 @@ export interface NearMiss {
 
 const f = (x: number, d = 2): string => (Number.isFinite(x) ? x.toFixed(d) : String(x))
 
+/**
+ * Saturation fallback (formulation fix, see PLAYTEST.md 2026-06-10): §7
+ * states gates 1–2 as survival ratios, but mean survival saturates at the
+ * ceiling for the strong half of the roster, where ratio sub-conditions
+ * become mathematically unsatisfiable (first flagged for gate 1 in the
+ * 2026-06-10 smoke). When BOTH bots of a comparison sit at the ceiling
+ * (mean survival ≥ SURVIVAL_SATURATION) the comparison switches to mean
+ * pareto — survival×credit×(1−residency), the axis that still separates
+ * the roster up there — with the §7 thresholds UNCHANGED. Below saturation
+ * the original survival comparison applies.
+ */
+export const SURVIVAL_SATURATION = 0.95
+
+export interface PairMetric {
+  a: number
+  b: number
+  metric: 'surv' | 'pareto'
+}
+
+export function pairMetric(a: BotSummary, b: BotSummary): PairMetric {
+  if (a.meanSurvivalFrac >= SURVIVAL_SATURATION && b.meanSurvivalFrac >= SURVIVAL_SATURATION)
+    return { a: a.meanPareto, b: b.meanPareto, metric: 'pareto' }
+  return { a: a.meanSurvivalFrac, b: b.meanSurvivalFrac, metric: 'surv' }
+}
+
 export function nearMissStats(details: readonly RoundDetail[]): NearMiss {
   let late = 0
   let resolved = 0
@@ -127,14 +161,21 @@ export function evaluateGates(
   const reactive = s['reactive']!
   const gates: GateResult[] = []
 
-  // 1 — recency trap + skill-gap ordering
+  // 1 — recency trap + skill-gap ordering. Each pairwise comparison applies
+  // the saturation fallback (formulation fix, see PLAYTEST.md): pareto when
+  // both bots' survival ≥ SURVIVAL_SATURATION, survival otherwise. The §7
+  // thresholds (0.60, 1.15×, ≈-tolerance) are unchanged.
   {
-    const ratioRec = oracle.meanSurvivalFrac > 0 ? recency.meanSurvivalFrac / oracle.meanSurvivalFrac : Infinity
+    const ra = pairMetric(recency, oracle) // recency ≤ 0.60 × oracle
+    const rb = pairMetric(oracle, greedy) // oracle ≥ 1.15 × greedy
+    const rc = pairMetric(greedy, recency) // greedy ≥ 1.15 × recency
+    const rd = pairMetric(recency, random) // recency ≈ random
+    const ratioRec = ra.b > 0 ? ra.a / ra.b : Infinity
     const a = ratioRec <= 0.6
-    const b = oracle.meanSurvivalFrac >= 1.15 * greedy.meanSurvivalFrac
-    const c = greedy.meanSurvivalFrac >= 1.15 * recency.meanSurvivalFrac
-    const gap = Math.abs(recency.meanSurvivalFrac - random.meanSurvivalFrac)
-    const tol = Math.max(0.1, 0.15 * Math.max(recency.meanSurvivalFrac, random.meanSurvivalFrac))
+    const b = rb.a >= 1.15 * rb.b
+    const c = rc.a >= 1.15 * rc.b
+    const gap = Math.abs(rd.a - rd.b)
+    const tol = Math.max(0.1, 0.15 * Math.max(rd.a, rd.b))
     const d = gap <= tol
     gates.push({
       id: 1,
@@ -142,31 +183,45 @@ export function evaluateGates(
       pass: a && b && c && d,
       measured: {
         recencyOverOracle: ratioRec,
-        oracleOverGreedy: greedy.meanSurvivalFrac > 0 ? oracle.meanSurvivalFrac / greedy.meanSurvivalFrac : Infinity,
-        greedyOverRecency: recency.meanSurvivalFrac > 0 ? greedy.meanSurvivalFrac / recency.meanSurvivalFrac : Infinity,
+        recencyOverOracleMetric: ra.metric,
+        oracleOverGreedy: rb.b > 0 ? rb.a / rb.b : Infinity,
+        oracleOverGreedyMetric: rb.metric,
+        greedyOverRecency: rc.b > 0 ? rc.a / rc.b : Infinity,
+        greedyOverRecencyMetric: rc.metric,
         recencyRandomGap: gap,
+        recencyRandomMetric: rd.metric,
       },
       detail:
-        `recency/oracle=${f(ratioRec)} (need ≤0.60 ${a ? 'ok' : 'FAIL'}); ` +
-        `oracle≫greedy ${f(oracle.meanSurvivalFrac)} vs ${f(greedy.meanSurvivalFrac)} (≥1.15× ${b ? 'ok' : 'FAIL'}); ` +
-        `greedy≫recency ${f(greedy.meanSurvivalFrac)} vs ${f(recency.meanSurvivalFrac)} (≥1.15× ${c ? 'ok' : 'FAIL'}); ` +
-        `|recency−random|=${f(gap)} (≤${f(tol)} ${d ? 'ok' : 'FAIL'})`,
+        `recency/oracle=${f(ratioRec)} [${ra.metric}] (need ≤0.60 ${a ? 'ok' : 'FAIL'}); ` +
+        `oracle≫greedy ${f(rb.a)} vs ${f(rb.b)} [${rb.metric}] (≥1.15× ${b ? 'ok' : 'FAIL'}); ` +
+        `greedy≫recency ${f(rc.a)} vs ${f(rc.b)} [${rc.metric}] (≥1.15× ${c ? 'ok' : 'FAIL'}); ` +
+        `|recency−random|=${f(gap)} [${rd.metric}] (≤${f(tol)} ${d ? 'ok' : 'FAIL'})`,
     })
   }
 
-  // 2 — commitment (the v1.1 gate)
+  // 2 — commitment (the v1.1 gate), same saturation fallback per comparison
+  // (formulation fix, see PLAYTEST.md); §7 thresholds (0.70, strict <)
+  // unchanged.
   {
-    const ratio = oracle.meanSurvivalFrac > 0 ? reactive.meanSurvivalFrac / oracle.meanSurvivalFrac : Infinity
+    const ra = pairMetric(reactive, oracle) // reactive ≤ 0.70 × oracle
+    const rb = pairMetric(reactive, greedy) // reactive < greedy
+    const ratio = ra.b > 0 ? ra.a / ra.b : Infinity
     const a = ratio <= 0.7
-    const b = reactive.meanSurvivalFrac < greedy.meanSurvivalFrac
+    const b = rb.a < rb.b
     gates.push({
       id: 2,
       name: 'commitment',
       pass: a && b,
-      measured: { reactiveOverOracle: ratio, reactiveSurv: reactive.meanSurvivalFrac, greedySurv: greedy.meanSurvivalFrac },
+      measured: {
+        reactiveOverOracle: ratio,
+        reactiveOverOracleMetric: ra.metric,
+        reactiveVsGreedyA: rb.a,
+        reactiveVsGreedyB: rb.b,
+        reactiveVsGreedyMetric: rb.metric,
+      },
       detail:
-        `reactive/oracle=${f(ratio)} (need ≤0.70 ${a ? 'ok' : 'FAIL'}); ` +
-        `reactive<greedy ${f(reactive.meanSurvivalFrac)} vs ${f(greedy.meanSurvivalFrac)} (${b ? 'ok' : 'FAIL'})`,
+        `reactive/oracle=${f(ratio)} [${ra.metric}] (need ≤0.70 ${a ? 'ok' : 'FAIL'}); ` +
+        `reactive<greedy ${f(rb.a)} vs ${f(rb.b)} [${rb.metric}] (${b ? 'ok' : 'FAIL'})`,
     })
   }
 
@@ -183,7 +238,10 @@ export function evaluateGates(
     })
   }
 
-  // 4 — near-miss tension (oracle)
+  // 4 — near-miss tension, measured on reactive+greedy resolved waves
+  // (formulation fix, see PLAYTEST.md: the oracle deliberately lands fetches
+  // ~12 ticks early as safety margin, so it never registers tension — the
+  // human-like bots are the right probe). Band [0.2, 0.4] unchanged.
   {
     const pass = nearMiss.frac >= 0.2 && nearMiss.frac <= 0.4
     gates.push({
@@ -191,7 +249,7 @@ export function evaluateGates(
       name: 'near-miss',
       pass,
       measured: { lateFrac: nearMiss.frac, late: nearMiss.late, resolved: nearMiss.resolved },
-      detail: `late-window arrivals ${nearMiss.late}/${nearMiss.resolved}=${f(nearMiss.frac)} (need 0.20..0.40)`,
+      detail: `late-window arrivals (reactive+greedy) ${nearMiss.late}/${nearMiss.resolved}=${f(nearMiss.frac)} (need 0.20..0.40)`,
     })
   }
 
@@ -262,14 +320,16 @@ function main(): number {
 
   const roster = makeRoster()
   const byBot: Record<string, RoundResult[]> = {}
-  const oracleDetails: RoundDetail[] = []
+  // Wave windows for gate #4 come from reactive + greedy-heat (formulation
+  // fix, see PLAYTEST.md — the oracle's safety margin hides the tension).
+  const tensionDetails: RoundDetail[] = []
   for (const bot of roster) {
-    const track = bot.wantsOracle === true // windows needed for gate #4 (oracle)
+    const track = bot.name === 'reactive' || bot.name === 'greedy-heat'
     const results: RoundResult[] = []
     for (const seed of seeds) {
       const det = runRoundDetailed(config, seed, bot, { trackWaves: track })
       results.push(det.result)
-      if (track) oracleDetails.push(det)
+      if (track) tensionDetails.push(det)
     }
     byBot[bot.name] = results
   }
@@ -281,7 +341,7 @@ function main(): number {
   printTable(summaries)
   console.log('')
 
-  const nearMiss = nearMissStats(oracleDetails)
+  const nearMiss = nearMissStats(tensionDetails)
   const gates = evaluateGates(byName, nearMiss, byBot['greedy-heat']!, byBot['reactive']!, config)
   for (const g of gates) {
     console.log(`Gate ${g.id} ${pad(g.name, 17)} ${g.pass ? 'PASS' : 'FAIL'} — ${g.detail}`)

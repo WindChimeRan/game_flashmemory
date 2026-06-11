@@ -112,7 +112,11 @@ export const DEFAULTS: SimConfig = {
   ticksPerSec: 10,
   roundTicks: 1800,
 
-  viewportLines: 34,
+  // 2026-06-10 tuning (PLAYTEST.md): viewportLines 34→26 + telegraphStd
+  // 36→28 — the minimal 2-knob diff from the 80-point sweep that maximizes
+  // commitment separation (oracle.pareto/reactive.pareto ≈ 1.5) while
+  // keeping recency ≤ 0.6×oracle survival, oracle aps and near-miss in band.
+  viewportLines: 26,
   tokensPerLine: 11,
   protectedChunks: 2,
 
@@ -127,7 +131,7 @@ export const DEFAULTS: SimConfig = {
   B: 2,
   actionBudget: 1,
 
-  telegraphStd: 36,
+  telegraphStd: 28,
   telegraphBoss: 120,
   waveGapMin: 70,
   waveGapMax: 130,
@@ -169,16 +173,31 @@ export const DEFAULTS: SimConfig = {
 
 export type PresetName = 'chill' | 'default' | 'inferno'
 
+// Presets sit symmetrically around the tuned DEFAULTS on the same axes
+// (rate, viewport, telegraph, cadence, distractors): chill relaxes the two
+// tuned knobs (viewport 26→30, telegraph 28→34), inferno tightens them
+// (26→24, 28→24). All three must satisfy validateConfig (L_warm 14 < tg,
+// L_cold 54 > tg holds for tg ∈ {24, 28, 34}).
 export function preset(name: PresetName): SimConfig {
   switch (name) {
     case 'chill':
-      return { ...DEFAULTS, ticksPerSec: 7, waveGapMin: 90, waveGapMax: 150, distractorFrac: 0.08 }
+      return {
+        ...DEFAULTS,
+        ticksPerSec: 7,
+        viewportLines: 30,
+        telegraphStd: 34,
+        waveGapMin: 90,
+        waveGapMax: 150,
+        distractorFrac: 0.08,
+      }
     case 'default':
       return { ...DEFAULTS }
     case 'inferno':
       return {
         ...DEFAULTS,
         ticksPerSec: 14,
+        viewportLines: 24,
+        telegraphStd: 24,
         waveGapMin: 55,
         waveGapMax: 100,
         bossCount: 2,

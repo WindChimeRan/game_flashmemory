@@ -31,7 +31,7 @@ import {
 } from './director'
 import { updateChunkHeat, nextPhantomGap, HEAT_IDLE } from './heat'
 import {
-  collapseDeath, oomDeath, snapshotViability,
+  HEAT_WARN_LEVEL, collapseDeath, heatWarnLegibility, oomDeath, snapshotViability,
   type EvictableMark, type WaveViability,
 } from './attribution'
 
@@ -52,6 +52,10 @@ interface ChunkInt {
   heat: number
   pips: number
   phantomTick: number
+  /** Ticks at which heat was ≥ HEAT_WARN_LEVEL — death attribution only
+   *  (gate #5 heat-warning legibility, see attribution.ts); not hashed
+   *  (fully derived from the hashed heat stream). */
+  readonly warnLog: number[]
 }
 
 interface WaveInt {
@@ -273,6 +277,7 @@ class SimImpl implements Sim {
         heat: HEAT_IDLE,
         pips: 1,
         phantomTick: 0,
+        warnLog: [],
       }
       if (plan.distractor) {
         c.phantomTick = now + nextPhantomGap(c.heatRng, cfg)
@@ -328,7 +333,11 @@ class SimImpl implements Sim {
         resolvedEv.push(res)
         this.resolutions.push(res)
         if (this.coherence <= 1e-9) {
-          this.death = collapseDeath(now, w, w.viability)
+          const heatWarn = heatWarnLegibility(
+            this.config, w.landTick, w.glyphs,
+            this.chunks.map((c) => ({ glyph: c.glyph, tier: c.tier, warnLog: c.warnLog })),
+          )
+          this.death = collapseDeath(now, w, w.viability, heatWarn)
           this.doneFlag = true
         }
       }
@@ -339,6 +348,7 @@ class SimImpl implements Sim {
     const demand = this.nextDemandByGlyph(now)
     for (const c of this.chunks) {
       updateChunkHeat(c, now, c.distractor ? Infinity : demand.get(c.glyph) ?? Infinity, cfg)
+      if (c.heat >= HEAT_WARN_LEVEL) c.warnLog.push(now) // gate #5 attribution
     }
 
     // 6. zen accrual (§4.4): reward low residency inside zen stretches.

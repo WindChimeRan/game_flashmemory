@@ -3,10 +3,21 @@
  * - 'oom'      → legible iff an evictable chunk (tier > 0, not protected /
  *                pinned / transferring) existed within attributionWindow
  *                ticks before death; the summary names it.
- * - 'collapse' → legible iff, for the killing wave, a viable response
- *                existed at telegraph time: a warm (summary) chunk could
- *                expand in time, or a bus slot freed early enough for the
- *                needed fetch chain. Snapshot taken when the telegraph fires.
+ * - 'collapse' → legible iff EITHER of two sufficient conditions holds
+ *                (formulation fix, see PLAYTEST.md 2026-06-10 — viability
+ *                was previously judged from telegraph time only, where a
+ *                cold demanded chunk is unservable BY CONSTRUCTION because
+ *                L_cold > telegraphStd, so those deaths read as illegible
+ *                even though the heat channel had warned long before):
+ *                (1) heat warning — every demanded glyph not served
+ *                    expanded at landing showed heat ≥ HEAT_WARN_LEVEL at
+ *                    least a full cold chain before the wave landed
+ *                    (within heatHorizon), i.e. an attentive player could
+ *                    have started the cold chain in time; or
+ *                (2) telegraph viability — a viable response existed when
+ *                    the telegraph fired: a warm (summary) chunk could
+ *                    expand in time, or a bus slot freed early enough for
+ *                    the needed fetch chain. Snapshot taken at telegraph.
  */
 
 import type { SimConfig } from './config'
@@ -123,17 +134,111 @@ export function snapshotViability(
   return { viable, note }
 }
 
+// ── heat-warning legibility (gate #5 formulation fix, see PLAYTEST.md) ──
+
+/** Heat level the attribution treats as a player-visible warning (the
+ *  telegraph-independent channel; §4.4 heat is honest pre-cliff). */
+export const HEAT_WARN_LEVEL = 0.5
+
+/** Full cold-chain latency — chip→summary (L_c2s), the one-tick handoff,
+ *  then summary→expanded (L_warm). Matches the cold plan in
+ *  snapshotViability. */
+export function coldChainLatency(cfg: Pick<SimConfig, 'L_c2s' | 'L_warm'>): number {
+  return cfg.L_c2s + 1 + cfg.L_warm
+}
+
+export interface HeatWarnChunk {
+  readonly glyph: string
+  /** Tier at death (== tier at landing; death fires on the land tick). */
+  readonly tier: Tier
+  /** Ticks at which this chunk's heat was ≥ HEAT_WARN_LEVEL. */
+  readonly warnLog: readonly number[]
+}
+
+export interface HeatWarnVerdict {
+  viable: boolean
+  note: string
+}
+
+/**
+ * Sufficient condition (1) for collapse legibility — formulation fix, see
+ * PLAYTEST.md: judge from HEAT-WARNING time, not telegraph time. For each
+ * demanded glyph that was NOT served expanded at landing, find the first
+ * tick within the heat horizon of the landing at which ANY chunk of that
+ * glyph showed heat ≥ HEAT_WARN_LEVEL (the horizon bound keeps warnings
+ * from long-resolved earlier demands of the same glyph from counting). If
+ * every such glyph warned at least a full cold chain before landing, an
+ * attentive player could have started the cold chain in time: legible.
+ */
+export function heatWarnLegibility(
+  cfg: Pick<SimConfig, 'L_c2s' | 'L_warm' | 'heatHorizon'>,
+  landTick: number,
+  glyphs: readonly string[],
+  chunks: readonly HeatWarnChunk[],
+): HeatWarnVerdict {
+  const chain = coldChainLatency(cfg)
+  const windowStart = landTick - cfg.heatHorizon
+  // Weakest warning among the glyphs whose absence caused the miss.
+  let worst: { glyph: string; span: number } | null = null
+  for (const g of glyphs) {
+    let served = false
+    let first = Infinity
+    for (const c of chunks) {
+      if (c.glyph !== g) continue
+      if (c.tier === 2) {
+        served = true
+        break
+      }
+      for (const t of c.warnLog) {
+        if (t >= windowStart && t < landTick && t < first) first = t
+      }
+    }
+    if (served) continue // expanded at landing — not part of the failure
+    const span = first === Infinity ? 0 : landTick - first
+    if (worst === null || span < worst.span) worst = { glyph: g, span }
+  }
+  if (worst === null)
+    return { viable: false, note: 'every demanded glyph was served expanded (miss not caused by absence)' }
+  if (worst.span >= chain)
+    return {
+      viable: true,
+      note: `heat warned for ${worst.span} ticks before landing on every unserved glyph (cold chain needs ${chain})`,
+    }
+  return {
+    viable: false,
+    note: `heat warned for only ${worst.span} ticks on [${worst.glyph}] (cold chain needs ${chain})`,
+  }
+}
+
 export function collapseDeath(
   now: number,
   wave: { id: number; glyphs: readonly string[]; telegraphTick: number },
   viability: WaveViability | null,
+  heatWarn: HeatWarnVerdict | null = null,
 ): DeathInfo {
-  const legible = viability?.viable ?? false
+  const teleViable = viability?.viable ?? false
+  const heatWarned = heatWarn?.viable ?? false
+  const legible = heatWarned || teleViable
   const glyphs = wave.glyphs.join('')
-  const summary = legible
-    ? `Coherence collapse at tick ${now}: wave #${wave.id} [${glyphs}] missed; a viable response existed ` +
-      `at telegraph (t${wave.telegraphTick}): ${viability!.note}.`
-    : `Coherence collapse at tick ${now}: wave #${wave.id} [${glyphs}] missed; no viable response remained ` +
-      `at telegraph (t${wave.telegraphTick}): ${viability?.note ?? 'no viability snapshot'}.`
+  const head = `Coherence collapse at tick ${now}: wave #${wave.id} [${glyphs}] missed; `
+  let summary: string
+  if (teleViable) {
+    // Telegraph viability first when both hold: it is the LATER of the two
+    // player-visible signals — the most recent moment the loss was still
+    // avoidable — which is the more damning thing to show on the death
+    // screen.
+    summary = head + `a viable response existed at telegraph (t${wave.telegraphTick}): ${viability!.note}.`
+  } else if (heatWarned) {
+    summary =
+      head +
+      `${heatWarn!.note} — an attentive player could have started the cold chain ` +
+      `before the telegraph (t${wave.telegraphTick}).`
+  } else {
+    summary =
+      head +
+      `no viable response remained at telegraph (t${wave.telegraphTick}): ` +
+      `${viability?.note ?? 'no viability snapshot'}` +
+      `${heatWarn ? `; ${heatWarn.note}` : ''}.`
+  }
   return { cause: 'collapse', tick: now, legible, summary }
 }
