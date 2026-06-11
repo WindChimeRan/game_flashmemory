@@ -6,12 +6,14 @@
  *  1. For every future demand, pick the best chunk per needed glyph
  *     (sufficiency-aware: bosses only need ceil(frac·|G|) expanded) and
  *     compute its serial chain latency from the current tier.
- *  2. Simulate the B-slot bus schedule (EDF, longest-chain-first within a
- *     wave); each job gets a projected finish and slack vs its landTick.
- *  3. Issue each start only when that job's own slack has shrunk to the
- *     safety margin (just-in-time starts keep residency low), tightest job
- *     first; under contention this degrades to ASAP starts. Bus-full
- *     rejections retry next tick because the plan is recomputed from scratch.
+ *  2. Simulate the B-slot bus schedule in latest-start-time order with
+ *     starts serialized at 1/tick; each job gets a projected start, finish,
+ *     and slack vs its landTick.
+ *  3. Issue a start only when its SUFFIX of the schedule (itself or anything
+ *     queued behind it, which its delay would push) has shrunk to the safety
+ *     margin (just-in-time starts keep residency low); under contention this
+ *     degrades to ASAP starts. Bus-full rejections retry next tick because
+ *     the plan is recomputed from scratch.
  *  4. Evict far-future / never-demanded chunks (distractors first — their
  *     next demand is Infinity) when pressure > evictAt, when a due fetch is
  *     blocked on headroom, or when the maxResidency cap needs room.
@@ -46,6 +48,8 @@ interface Job {
   /** True when this fetch can only reach summary by land (partial credit). */
   degraded: boolean
   cost: number
+  /** Projected start tick under the B-slot + 1-action/tick schedule. */
+  start: number
   slack: number
 }
 
@@ -161,25 +165,31 @@ export class OracleBot implements OomBot {
         if (c.transfer.toTier === 1) {
           const gate = c.transfer.arriveTick + 1
           if (gate + this.L_warm <= land)
-            consider({ glyph, chunkId: c.id, gate, lat: this.L_warm, land, degraded: false, cost, slack: 0 })
+            consider({ glyph, chunkId: c.id, gate, lat: this.L_warm, land, degraded: false, cost, start: 0, slack: 0 })
         }
         continue
       }
       const gate = now + 1
       if (c.tier === 1) {
         if (gate + this.L_warm <= land)
-          consider({ glyph, chunkId: c.id, gate, lat: this.L_warm, land, degraded: false, cost, slack: 0 })
+          consider({ glyph, chunkId: c.id, gate, lat: this.L_warm, land, degraded: false, cost, start: 0, slack: 0 })
       } else if (c.tier === 0) {
         if (gate + this.chainLat(0) <= land)
-          consider({ glyph, chunkId: c.id, gate, lat: this.chainLat(0), land, degraded: false, cost, slack: 0 })
+          consider({ glyph, chunkId: c.id, gate, lat: this.chainLat(0), land, degraded: false, cost, start: 0, slack: 0 })
         else if (gate + this.L_c2s <= land)
-          consider({ glyph, chunkId: c.id, gate, lat: this.L_c2s, land, degraded: true, cost, slack: 0 })
+          consider({ glyph, chunkId: c.id, gate, lat: this.L_c2s, land, degraded: true, cost, start: 0, slack: 0 })
       }
     }
     return best
   }
 
-  /** Greedy B-slot schedule (EDF, full jobs first); fills job.slack. */
+  /** Greedy B-slot schedule; fills job.start/job.slack. Jobs are ordered by
+   *  LATEST-START-TIME (land − lat; full jobs first) — for equal lands this
+   *  is the old longest-chain-first rule, and across lands it lets a tight
+   *  long chain claim a slot before a slack-rich short warm leg. Starts of
+   *  gate-ready jobs are additionally serialized at one per tick (the bot
+   *  can release only one action per tick), so a band-cluster's 2nd/3rd job
+   *  sees its true, later start — and therefore its true, smaller slack. */
   private schedule(view: SimView, jobs: Job[], now: number): void {
     const slots: number[] = []
     for (const c of view.chunks) if (c.transfer) slots.push(c.transfer.arriveTick + 1)
@@ -190,16 +200,23 @@ export class OracleBot implements OomBot {
     jobs.sort(
       (a, b) =>
         Number(a.degraded) - Number(b.degraded) ||
+        a.land - a.lat - (b.land - b.lat) ||
         a.land - b.land ||
-        b.lat - a.lat ||
         a.cost - b.cost ||
         a.chunkId - b.chunkId,
     )
+    let cursor = now + 1 // next tick an 'up' action can be processed
     for (const j of jobs) {
       let si = 0
       for (let i = 1; i < slots.length; i++) if (slots[i]! < slots[si]!) si = i
-      const start = Math.max(slots[si]!, j.gate)
-      const finish = start + j.lat
+      const base = Math.max(slots[si]!, j.gate)
+      if (j.gate <= now + 1 && base <= cursor) {
+        j.start = cursor
+        cursor++
+      } else {
+        j.start = base // slot- or gate-bound future start; no action needed yet
+      }
+      const finish = j.start + j.lat
       slots[si] = finish + 1
       j.slack = j.land - finish
     }
@@ -248,23 +265,28 @@ export class OracleBot implements OomBot {
 
     let needRoom = false
 
-    // Release each start when ITS OWN slack shrinks into the JIT band (late,
-    // i.e. negative-slack, jobs first). A previous global trigger (min slack
-    // over FULL jobs, released in EDF order) had two failure modes: (a) when
-    // only degraded jobs remained, the trigger never fired and banked partial
-    // credit was silently dropped; (b) under bus contention it spent the
-    // urgent chain's last tick starting an earlier-landing job that still had
-    // plenty of slack.
+    // Release a job when the JIT band is hit by its SUFFIX — itself or any
+    // job scheduled behind it, since delaying this start delays everything
+    // queued after it on the slots/action cursor. A per-job-slack trigger
+    // strands pipelines (a boss's 3rd chain queued on a busy slot can be 40
+    // ticks late while the two front chains still sit outside their own
+    // band); a global min-slack trigger over FULL jobs only (the original)
+    // (a) never fired when only degraded jobs remained, silently dropping
+    // banked partial credit, and (b) released in EDF order, spending the
+    // urgent chain's last tick on a slack-rich earlier-landing warm leg.
     const band = this.safety + this.jitGrace
-    const ready = jobs.filter((j) => j.slack <= band && j.gate <= now + 1)
-    ready.sort(
-      (a, b) =>
-        a.slack - b.slack ||
-        Number(a.degraded) - Number(b.degraded) ||
-        a.land - b.land ||
-        a.chunkId - b.chunkId,
-    )
-    for (const j of ready) {
+    // suffixTight[i]: jobs[i..] contains a job with slack ≤ band. Monotone
+    // (non-increasing along i), so the release loop can stop at the first
+    // position whose whole suffix is slack-rich.
+    const suffixTight: boolean[] = new Array<boolean>(jobs.length)
+    for (let i = jobs.length - 1, t = false; i >= 0; i--) {
+      if (jobs[i]!.slack <= band) t = true
+      suffixTight[i] = t
+    }
+    for (let i = 0; i < jobs.length; i++) {
+      if (!suffixTight[i]) break // everything from here has room to wait
+      const j = jobs[i]!
+      if (j.start > now + 1) continue // slot/gate/cursor-bound: not yet
       const c = view.chunks[j.chunkId]
       if (!c || c.transfer || c.tier >= 2) continue
       if (busFree(view) <= 0) break // bus saturated; retry next tick

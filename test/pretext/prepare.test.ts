@@ -111,53 +111,10 @@ describe('prepare: classification', () => {
   })
 })
 
-describe('append: stable ids & tail re-segmentation', () => {
-  test('extending a trailing word retires it for a fresh id', () => {
-    const p1 = prepare('hello wor')
-    const p2 = append(p1, 'ld!')
-    expect(shape(p2)).toEqual([
-      ['word', 'hello', 5],
-      ['space', ' ', 1],
-      ['word', 'world!', 6],
-    ])
-    expect(ids(p2)).toEqual([0, 1, 3]) // 'wor' (id 2) retired, never reused
-    expect(p2.version).toBe(1)
-    expect(p1.segments[2]).toEqual({ id: 2, kind: 'word', text: 'wor', width: 3 }) // input untouched
-  })
-
-  test('append starting with whitespace retires nothing', () => {
-    const p2 = append(prepare('ab cd'), ' ef')
-    expect(ids(p2)).toEqual([0, 1, 2, 3, 4])
-    expect(shape(p2)).toEqual([
-      ['word', 'ab', 2],
-      ['space', ' ', 1],
-      ['word', 'cd', 2],
-      ['space', ' ', 1],
-      ['word', 'ef', 2],
-    ])
-  })
-
-  test('CJK tail: completed glyph segments keep their ids', () => {
-    const p2 = append(prepare('日本'), '語x')
-    expect(shape(p2)).toEqual([
-      ['word', '日', 2],
-      ['word', '本', 2],
-      ['word', '語', 2],
-      ['word', 'x', 1],
-    ])
-    expect(ids(p2)).toEqual([0, 1, 2, 3])
-  })
-
-  test('cluster merge across the seam: regional indicators pair up', () => {
-    const p2 = append(prepare('go 🇺'), '🇸')
-    expect(shape(p2)).toEqual([
-      ['word', 'go', 2],
-      ['space', ' ', 1],
-      ['word', '🇺🇸', 2],
-    ])
-    expect(ids(p2)).toEqual([0, 1, 3]) // lone 🇺 (id 2) retired
-  })
-
+// NOTE: core append id-stability goldens (trailing-word retirement,
+// whitespace appends, CJK tails, RI pairing, id-reuse chains) live in
+// append.test.ts; this file adds the seam-merge and shape-equality cases.
+describe('append: seam merges & lineage shape', () => {
   test('combining mark merges into the trailing word', () => {
     const p2 = append(prepare('x ab'), '\u0301c')
     expect(shape(p2)).toEqual([
@@ -195,13 +152,6 @@ describe('append: stable ids & tail re-segmentation', () => {
       ['space', ' ', 1],
       ['word', emoji, 2],
     ])
-  })
-
-  test('append("") keeps segments, bumps version only', () => {
-    const p1 = prepare('ab cd')
-    const p2 = append(p1, '')
-    expect(p2.segments).toEqual(p1.segments)
-    expect(p2.version).toBe(1)
   })
 
   test('append to an empty prepare', () => {

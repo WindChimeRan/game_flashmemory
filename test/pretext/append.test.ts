@@ -37,17 +37,33 @@ describe('append: stable ids', () => {
     expect(p2.segments.map((s) => s.id)).toEqual([0, 1, 2, 3, 4])
   })
 
-  test('append after a trailing space keeps the space id', () => {
+  test('appended whitespace merges into a trailing space run (boundary re-segmented)', () => {
     const p1 = prepare('hello ')
     const p2 = append(p1, ' next')
-    // old trailing space kept; appended whitespace becomes its own segment
-    expect(p2.segments[1]).toBe(p1.segments[1])
+    // the boundary space is re-segmented with the appended text: the two
+    // spaces fuse into one run, exactly like a from-scratch prepare; the old
+    // space id is retired for the merged segment
+    expect(p2.segments.map((s) => [s.kind, s.text])).toEqual([
+      ['word', 'hello'],
+      ['space', '  '],
+      ['word', 'next'],
+    ])
+    expect(p2.segments[0]).toBe(p1.segments[0])
+    expect(p2.segments.map((s) => s.id)).toEqual([0, 2, 3])
+  })
+
+  test('append after a trailing space keeps the space id when nothing merges', () => {
+    const p1 = prepare('hello ')
+    const p2 = append(p1, 'next one')
+    expect(p2.segments[1]).toBe(p1.segments[1]) // boundary untouched → kept
     expect(p2.segments.map((s) => [s.kind, s.text])).toEqual([
       ['word', 'hello'],
       ['space', ' '],
-      ['space', ' '],
       ['word', 'next'],
+      ['space', ' '],
+      ['word', 'one'],
     ])
+    expect(p2.segments.map((s) => s.id)).toEqual([0, 1, 2, 3, 4])
   })
 
   test('extending a CJK run retires nothing (glyphs are complete segments)', () => {

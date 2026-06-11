@@ -28,9 +28,13 @@
  *
  * Incremental path (prev as a speed hint, REQUIRED to be invisible:
  * layout(p, w, prev) ≡ layout(p, w) by deep equality):
- * - prepare()'s lineage journal gives D = the first segment index that may
+ * - prepare()'s journal chain gives D = the first segment index that may
  *   differ between prev.version and p.version (Infinity ⇒ no change ⇒ prev's
- *   lines are returned as-is).
+ *   lines are returned as-is). Every layout is tagged with the chain node it
+ *   was built against; walking p's chain back to prev's node both collects D
+ *   and PROVES prev belongs to this exact lineage branch — a prev from a
+ *   different prepare(), a sibling branch, or a hand-built object fails the
+ *   walk and triggers a full layout instead of silently wrong reuse.
  * - Greedy breaking is memoryless at line starts (col 0, no pending), so a
  *   per-Layout anchor table (WeakMap side cache) records for every line the
  *   index of the first segment it processed, whether it starts clean (not
@@ -47,7 +51,7 @@
 
 import { cellWidth, graphemes } from '../shared/width'
 import type { Layout, Line, Placement, Prepared, Segment } from './types'
-import { firstDirtyIndex } from './prepare'
+import { chainOf, type Chain } from './prepare'
 
 /** Why a line ended ('start' marks the first line of a layout run). */
 type EndReason = 'start' | 'break' | 'wrap'
@@ -62,6 +66,8 @@ interface Anchor {
 }
 
 const anchorsCache = new WeakMap<Layout, readonly Anchor[]>()
+/** Journal node each layout was built against (lineage-branch witness). */
+const chainTag = new WeakMap<Layout, Chain>()
 const wideUnitCache = new WeakMap<Segment, boolean>()
 const graphemeWidthsCache = new WeakMap<Segment, readonly number[]>()
 
@@ -216,22 +222,46 @@ function layoutRun(
   return { lines, anchors }
 }
 
+function tagged(lay: Layout, p: Prepared): Layout {
+  const node = chainOf(p)
+  if (node !== undefined) chainTag.set(lay, node)
+  return lay
+}
+
 function fullLayout(p: Prepared, w: number): Layout {
   const run = layoutRun(p.segments, 0, w, 'start')
   const lay: Layout = { lines: run.lines, width: w, version: p.version }
   anchorsCache.set(lay, run.anchors)
-  return lay
+  return tagged(lay, p)
+}
+
+/**
+ * Walk p's journal chain back to the node prev was built against, collecting
+ * the minimum dirty index along the way. Returns undefined when prev is not
+ * an ancestor state of p on this exact branch (then reuse would be unsound).
+ */
+function dirtySince(p: Prepared, prev: Layout): number | undefined {
+  const target = chainTag.get(prev)
+  let node = chainOf(p)
+  if (target === undefined || node === undefined) return undefined
+  let dirty = Infinity
+  while (node !== undefined && node !== target && node.version > target.version) {
+    if (node.dirty < dirty) dirty = node.dirty
+    node = node.parent
+  }
+  return node === target ? dirty : undefined
 }
 
 function tryIncremental(p: Prepared, w: number, prev: Layout): Layout | undefined {
-  const dirty = firstDirtyIndex(p, prev.version)
+  const dirty = dirtySince(p, prev)
+  if (dirty === undefined) return undefined // not this lineage branch
   if (dirty === Infinity) {
     // Provably no segment changed since prev was computed.
     if (prev.version === p.version) return prev
     const lay: Layout = { lines: prev.lines, width: w, version: p.version }
     const anchors = anchorsCache.get(prev)
     if (anchors !== undefined) anchorsCache.set(lay, anchors)
-    return lay
+    return tagged(lay, p)
   }
   if (dirty <= 0) return undefined
   const anchors = anchorsCache.get(prev)
@@ -264,7 +294,7 @@ function tryIncremental(p: Prepared, w: number, prev: Layout): Layout | undefine
     version: p.version,
   }
   anchorsCache.set(lay, anchors.slice(0, reuse).concat(run.anchors))
-  return lay
+  return tagged(lay, p)
 }
 
 /**

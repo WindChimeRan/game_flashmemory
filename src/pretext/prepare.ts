@@ -48,10 +48,14 @@
  *    sequence; ids differ) to a from-scratch prepare of the concatenated
  *    string — property-tested in test/pretext.
  *
- * A per-lineage journal (WeakMap, invisible to callers) records, for each
- * append, the first segment index that changed. layout() uses it to find the
- * first potentially-dirty line; losing the journal only costs performance,
- * never correctness.
+ * A persistent chain of journal nodes (WeakMap-attached, invisible to
+ * callers) records, for each append, the first segment index that changed
+ * and a parent pointer to the previous version's node. layout() walks the
+ * chain to find the first potentially-dirty line AND to prove the prev hint
+ * really belongs to this exact lineage branch (a layout built from a
+ * different prepare() — or from a sibling branch of the same lineage — is
+ * detected by node identity and safely ignored). Losing the chain only
+ * costs performance, never correctness.
  */
 
 import { cellWidth, graphemes } from '../shared/width'
@@ -129,41 +133,23 @@ function segmentText(text: string): RawSeg[] {
   return out
 }
 
-/** Dirty-tracking journal shared by every Prepared of one lineage. */
-interface Journal {
-  /** Version at which tracking began; diffs before this are unknown. */
-  start: number
-  /**
-   * One entry per append(), in version order: the first segment index at
-   * which the list changed (Infinity ⇒ that append was a no-op).
-   */
-  events: { version: number; dirty: number }[]
+/**
+ * One immutable journal node per Prepared. `dirty` is the first segment
+ * index that may differ from the PARENT version's list (Infinity ⇒ no-op
+ * append). Node identity doubles as a lineage-branch witness: a node is
+ * reachable by parent pointers exactly from its own descendants.
+ */
+export interface Chain {
+  readonly version: number
+  readonly dirty: number
+  readonly parent: Chain | undefined
 }
 
-const journals = new WeakMap<Prepared, Journal>()
+const chains = new WeakMap<Prepared, Chain>()
 
-/**
- * @internal (used by layout) — smallest segment index that may differ
- * between the segment lists at version `since` and at `p.version`.
- * Infinity ⇒ provably unchanged; 0 ⇒ unknown, treat everything as dirty.
- */
-export function firstDirtyIndex(p: Prepared, since: number): number {
-  const j = journals.get(p)
-  if (j === undefined || since < j.start) return 0
-  const evs = j.events
-  // First event with version > since (events are sorted by version).
-  let lo = 0
-  let hi = evs.length
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1
-    if (evs[mid]!.version > since) hi = mid
-    else lo = mid + 1
-  }
-  let dirty = Infinity
-  for (let k = lo; k < evs.length && evs[k]!.version <= p.version; k++) {
-    if (evs[k]!.dirty < dirty) dirty = evs[k]!.dirty
-  }
-  return dirty
+/** @internal (used by layout) — journal node of `p`, if this module made it. */
+export function chainOf(p: Prepared): Chain | undefined {
+  return chains.get(p)
 }
 
 /** Expensive pass: segment `text` into stably-identified segments. */
@@ -175,7 +161,7 @@ export function prepare(text: string): Prepared {
     width: r.width,
   }))
   const p: Prepared = { segments, version: 0 }
-  journals.set(p, { start: 0, events: [] })
+  chains.set(p, { version: 0, dirty: Infinity, parent: undefined })
   return p
 }
 
@@ -219,9 +205,9 @@ export function append(p: Prepared, text: string): Prepared {
   const version = p.version + 1
   const unchanged = keep === oldTailLen && raw.length === keep
   const dirty = unchanged ? Infinity : tailStart + keep
-  const journal = journals.get(p) ?? { start: p.version, events: [] }
-  journal.events.push({ version, dirty })
   const next: Prepared = { segments, version }
-  journals.set(next, journal)
+  // parent === undefined for a foreign Prepared: layouts older than `next`
+  // can never be verified against it, so incremental reuse will bail.
+  chains.set(next, { version, dirty, parent: chains.get(p) })
   return next
 }

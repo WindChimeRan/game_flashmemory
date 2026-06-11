@@ -87,3 +87,46 @@ describe('incremental layout ≡ from-scratch layout', () => {
     }
   })
 })
+
+describe('prev misuse is detected and falls back to a full layout', () => {
+  test('same prepared + same width: prev itself is returned', () => {
+    const p = prepare('hello world this is stable')
+    const l1 = layout(p, 8)
+    expect(layout(p, 8, l1)).toBe(l1)
+  })
+
+  test('prev NEWER than the prepared is ignored', () => {
+    const p1 = prepare('aa bb cc dd')
+    const p2 = append(p1, ' ee')
+    const newer = layout(p2, 6)
+    expect(layout(p1, 6, newer)).toEqual(layout(p1, 6))
+  })
+
+  test('a hand-built foreign prev object is ignored', () => {
+    let p = prepare('lorem ipsum dolor sit amet')
+    const scratch = layout(p, 9)
+    const foreign: Layout = { lines: scratch.lines, width: scratch.width, version: scratch.version }
+    p = append(p, ' consectetur')
+    expect(layout(p, 9, foreign)).toEqual(layout(p, 9))
+  })
+
+  test('prev from a DIFFERENT lineage with the same version/width is ignored', () => {
+    const pA = prepare('aaa bbb ccc')
+    const lA = layout(pA, 6)
+    const pB = prepare('xx yy zz ww vv')
+    expect(layout(pB, 6, lA)).toEqual(layout(pB, 6))
+    const pB2 = append(pB, ' uu')
+    expect(layout(pB2, 6, lA)).toEqual(layout(pB2, 6))
+  })
+
+  test('prev from a SIBLING BRANCH of the same lineage is ignored', () => {
+    const base = prepare('shared base text here')
+    const branchA = append(base, ' aaaaaa')
+    const branchB = append(base, ' b')
+    const lA = layout(branchA, 7) // same version as branchB, different segments
+    expect(layout(branchB, 7, lA)).toEqual(layout(branchB, 7))
+    // …while prev from the common ancestor is still a usable hint
+    const lBase = layout(base, 7)
+    expect(layout(branchB, 7, lBase)).toEqual(layout(branchB, 7))
+  })
+})
